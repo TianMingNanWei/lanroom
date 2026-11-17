@@ -4,7 +4,6 @@
 #include "oi_base.h"
 #include "oi_config.h"
 #include "oi_log.h"
-#include "oi_poll.h"
 #include "oi_redis.h"
 #include <exception>
 #include <stdio.h>
@@ -25,42 +24,49 @@ int main(int iArgumentCount, char* vArguments[])
 	{
 		::OI::Log::InitLocal(NULL);
 	}
-	try
+	iCode = [&]() -> int32_t
 	{
-		if ((iCode = ::OI::Redis::RedisClient::GetInstance().Init()) != OI_OK)
+		try
 		{
-			fprintf(stderr, "redis client init failed code=%d\n", iCode);
-			return 1;
+			if ((iCode = ::OI::Redis::RedisClient::GetInstance().Init()) != OI_OK)
+			{
+				fprintf(stderr, "redis client init failed code=%d\n", iCode);
+				return 1;
+			}
+			::OI::Redis::RedisClient::GetInstance().StartClient();
+			if ((iCode = RoomServer::GetInstance().Init()) != OI_OK || (iCode = RoomServer::GetInstance().StartServer()) != OI_OK)
+			{
+				fprintf(stderr, "room rpc listen failed code=%d\n", iCode);
+				return 1;
+			}
+			if ((iCode = RoomUdp::GetInstance().Init()) != OI_OK || (iCode = RoomUdp::GetInstance().StartServer()) != OI_OK)
+			{
+				fprintf(stderr, "udp bind failed code=%d\n", iCode);
+				return 1;
+			}
+			std::string sIp;
+			::OI::Base::Config::GlobalConfig().GetAs("RoomUdp.ip", sIp);
+			printf("lanroom server listen %s:%u\n", sIp.c_str(), RoomUdp::GetInstance().LocalPort());
+			fflush(stdout);
 		}
-		::OI::Redis::RedisClient::GetInstance().StartClient();
-		if ((iCode = RoomServer::GetInstance().Init()) != OI_OK || (iCode = RoomServer::GetInstance().StartServer()) != OI_OK)
+		catch (const std::exception& stError)
 		{
-			fprintf(stderr, "room rpc listen failed code=%d\n", iCode);
-			return 1;
+			fprintf(stderr, "module init failed: %s\n", stError.what());
+			fflush(stderr);
+			return OI_ERR_FAIL;
 		}
-		if ((iCode = RoomUdp::GetInstance().Init()) != OI_OK || (iCode = RoomUdp::GetInstance().StartServer()) != OI_OK)
+		catch (...)
 		{
-			fprintf(stderr, "udp bind failed code=%d\n", iCode);
-			return 1;
+			fprintf(stderr, "module init failed: unknown exception\n");
+			fflush(stderr);
+			return OI_ERR_FAIL;
 		}
-		std::string sIp;
-		::OI::Base::Config::GlobalConfig().GetAs("RoomUdp.ip", sIp);
-		printf("lanroom server listen %s:%u\n", sIp.c_str(), RoomUdp::GetInstance().LocalPort());
-		fflush(stdout);
-	}
-	catch (const std::exception& stError)
+		return OI_OK;
+	}();
+	if (iCode != OI_OK)
 	{
-		fprintf(stderr, "module init failed: %s\n", stError.what());
-		fflush(stderr);
-		::OI::Net::Poll::GetInstance().StopAndJoin();
-		return OI_ERR_FAIL;
-	}
-	catch (...)
-	{
-		fprintf(stderr, "module init failed: unknown exception\n");
-		fflush(stderr);
-		::OI::Net::Poll::GetInstance().StopAndJoin();
-		return OI_ERR_FAIL;
+		::OI::Base::StopFramework();
+		return iCode;
 	}
 	return ::OI::Base::RunFramework();
 }

@@ -240,6 +240,12 @@ int RunClientWindow(const char* pConfig, const std::string& sServer, int iPort, 
 	catch (const webview::exception& stError)
 	{
 		fprintf(stderr, "webview: %s\n", stError.what());
+		bOpen.store(false);
+		if (stJoin.joinable())
+		{
+			stJoin.join();
+		}
+		::OI::Base::StopFramework();
 		return 1;
 	}
 	return 0;

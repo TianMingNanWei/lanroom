@@ -6,7 +6,6 @@
 #include "oi_app.h"
 #include "oi_base.h"
 #include "oi_log.h"
-#include "oi_poll.h"
 #include <exception>
 #include <stdio.h>
 #include <stdlib.h>
@@ -82,41 +81,48 @@ int main(int iArgumentCount, char* vArguments[])
 	{
 		::OI::Log::InitLocal(NULL);
 	}
-	try
+	iCode = [&]() -> int32_t
 	{
-		if (!RoomMgr::GetInstance().Prepare(sRoom, sMac, sServer, (uint16_t)iServerPort, bDrop, bTcp) || !NicMgr::GetInstance().Listen((uint16_t)iNicPort))
+		try
 		{
-			fprintf(stderr, "usage: lanroom-client --room name --mac aa:bb:cc:dd:ee:ff --nic-port N [--bind ip] [--server ip] [--server-port N]\n");
-			return 2;
+			if (!RoomMgr::GetInstance().Prepare(sRoom, sMac, sServer, (uint16_t)iServerPort, bDrop, bTcp) || !NicMgr::GetInstance().Listen((uint16_t)iNicPort))
+			{
+				fprintf(stderr, "usage: lanroom-client --room name --mac aa:bb:cc:dd:ee:ff --nic-port N [--bind ip] [--server ip] [--server-port N]\n");
+				return 2;
+			}
+			if ((iCode = RoomUdp::GetInstance().Init(sBind)) != OI_OK || (iCode = RoomUdp::GetInstance().StartServer()) != OI_OK)
+			{
+				fprintf(stderr, "udp bind failed code=%d\n", iCode);
+				return 1;
+			}
+			printf("lanroom client port %u\n", RoomUdp::GetInstance().LocalPort());
+			fflush(stdout);
+			if ((iCode = RoomClient::GetInstance().Init()) != OI_OK)
+			{
+				fprintf(stderr, "RoomClient Init error code=%d\n", iCode);
+				return 1;
+			}
+			RoomClient::GetInstance().UseHost(sServer);
+			RoomClient::GetInstance().Start();
 		}
-		if ((iCode = RoomUdp::GetInstance().Init(sBind)) != OI_OK || (iCode = RoomUdp::GetInstance().StartServer()) != OI_OK)
+		catch (const std::exception& stError)
 		{
-			fprintf(stderr, "udp bind failed code=%d\n", iCode);
-			return 1;
+			fprintf(stderr, "module init failed: %s\n", stError.what());
+			fflush(stderr);
+			return OI_ERR_FAIL;
 		}
-		printf("lanroom client port %u\n", RoomUdp::GetInstance().LocalPort());
-		fflush(stdout);
-		if ((iCode = RoomClient::GetInstance().Init()) != OI_OK)
+		catch (...)
 		{
-			fprintf(stderr, "RoomClient Init error code=%d\n", iCode);
-			return 1;
+			fprintf(stderr, "module init failed: unknown exception\n");
+			fflush(stderr);
+			return OI_ERR_FAIL;
 		}
-		RoomClient::GetInstance().UseHost(sServer);
-		RoomClient::GetInstance().Start();
-	}
-	catch (const std::exception& stError)
+		return OI_OK;
+	}();
+	if (iCode != OI_OK)
 	{
-		fprintf(stderr, "module init failed: %s\n", stError.what());
-		fflush(stderr);
-		::OI::Net::Poll::GetInstance().StopAndJoin();
-		return OI_ERR_FAIL;
-	}
-	catch (...)
-	{
-		fprintf(stderr, "module init failed: unknown exception\n");
-		fflush(stderr);
-		::OI::Net::Poll::GetInstance().StopAndJoin();
-		return OI_ERR_FAIL;
+		::OI::Base::StopFramework();
+		return iCode;
 	}
 	iCode = ::OI::Base::RunFramework();
 	RoomMgr::GetInstance().Stop();
