@@ -19,7 +19,7 @@ public:
         sFrame = l_sFrame;
         
     }
-    virtual ::OI::Base::BytesStream& serialize(::OI::Base::BytesStream& os) const
+    ::OI::Base::BytesStream& serialize(::OI::Base::BytesStream& os) const override
     {
         os.WritePb(0, sRoom);
         os.WritePb(1, sMac);
@@ -27,7 +27,7 @@ public:
         os.WritePb(3, sFrame);
         return os;
     }
-    virtual ::OI::Base::BytesStream& deserialize(::OI::Base::BytesStream& os)
+    ::OI::Base::BytesStream& deserialize(::OI::Base::BytesStream& os) override
     {
         static constexpr std::array<::OI::Base::PbField, 4> fields = {{
             OI_PB_FIELD(CarryReq, 0, sRoom),

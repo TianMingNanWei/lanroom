@@ -14,10 +14,10 @@ class NicMgr : public ::OI::Net::SessionManager
 	bool Listen(uint16_t iPort);
 	void SendText(sid_t iSessionId, const std::string& sText);
 	void SendFrame(sid_t iSessionId, const std::vector<uint8_t>& vFrame);
-	virtual const std::string GetIDString();
+	const std::string GetIDString() override;
 
   protected:
-	virtual ::OI::Net::Session* CloneSession();
-	virtual void OnAddSession(::OI::Net::Session* pSession);
-	virtual void OnDelSession(const ::OI::Net::Session* pSession);
+	::OI::Net::Session* CloneSession() override;
+	void OnAddSession(::OI::Net::Session* pSession) override;
+	void OnDelSession(const ::OI::Net::Session* pSession) override;
 };

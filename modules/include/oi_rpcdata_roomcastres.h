@@ -13,12 +13,12 @@ public:
         sRoom = l_sRoom;
         
     }
-    virtual ::OI::Base::BytesStream& serialize(::OI::Base::BytesStream& os) const
+    ::OI::Base::BytesStream& serialize(::OI::Base::BytesStream& os) const override
     {
         os.WritePb(0, sRoom);
         return os;
     }
-    virtual ::OI::Base::BytesStream& deserialize(::OI::Base::BytesStream& os)
+    ::OI::Base::BytesStream& deserialize(::OI::Base::BytesStream& os) override
     {
         static constexpr std::array<::OI::Base::PbField, 1> fields = {{
             OI_PB_FIELD(RoomCastRes, 0, sRoom),

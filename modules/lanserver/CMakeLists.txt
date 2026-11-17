@@ -16,7 +16,13 @@ target_include_directories(lanserver PRIVATE
 )
 # 转发只在一条 poll 上跑。要扩容就多起进程。客户端另说，要接界面。
 target_compile_definitions(lanserver PRIVATE _SINGLE_THREAD_)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+	target_link_libraries(lanserver PRIVATE -Wl,--start-group)
+endif()
 target_link_libraries(lanserver PRIVATE redis_static proto_static net_static logger_static timer_static base_static jsoncpp_static)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+	target_link_libraries(lanserver PRIVATE -Wl,--end-group)
+endif()
 if(WIN32)
 	target_link_libraries(lanserver PRIVATE ws2_32 iphlpapi)
 endif()

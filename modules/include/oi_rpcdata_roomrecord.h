@@ -19,14 +19,14 @@ public:
         stAttr = l_stAttr;
         
     }
-    virtual ::OI::Base::BytesStream& serialize(::OI::Base::BytesStream& os) const
+    ::OI::Base::BytesStream& serialize(::OI::Base::BytesStream& os) const override
     {
         os.WritePb(0, iRelayCount);
         os.WritePb(1, vMembers);
         os.WritePb(2, stAttr);
         return os;
     }
-    virtual ::OI::Base::BytesStream& deserialize(::OI::Base::BytesStream& os)
+    ::OI::Base::BytesStream& deserialize(::OI::Base::BytesStream& os) override
     {
         static constexpr std::array<::OI::Base::PbField, 3> fields = {{
             OI_PB_FIELD(RoomRecord, 0, iRelayCount),

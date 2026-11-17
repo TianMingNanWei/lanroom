@@ -38,7 +38,11 @@ bool RoomUdp::Source(sid_t iSessionId, uint32_t& iIp, uint16_t& iPort)
 
 int32_t RoomUdp::Init()
 {
-	OI_NOTIFY_BIND_SELF(Probe, RoomUdp, HandleProbe);
+	int32_t iCode = HandleNotify(&RoomUdp::HandleProbe);
+	if (iCode != OI_OK)
+	{
+		return iCode;
+	}
 	return ::OI::Rpc::ProtoSessionManager::Init();
 }
 

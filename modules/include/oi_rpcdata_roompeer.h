@@ -21,7 +21,7 @@ public:
         iDirect = l_iDirect;
         
     }
-    virtual ::OI::Base::BytesStream& serialize(::OI::Base::BytesStream& os) const
+    ::OI::Base::BytesStream& serialize(::OI::Base::BytesStream& os) const override
     {
         os.WritePb(0, sMac);
         os.WritePb(1, iSourceIp);
@@ -30,7 +30,7 @@ public:
         os.WritePb(4, iDirect);
         return os;
     }
-    virtual ::OI::Base::BytesStream& deserialize(::OI::Base::BytesStream& os)
+    ::OI::Base::BytesStream& deserialize(::OI::Base::BytesStream& os) override
     {
         static constexpr std::array<::OI::Base::PbField, 5> fields = {{
             OI_PB_FIELD(RoomPeer, 0, sMac),

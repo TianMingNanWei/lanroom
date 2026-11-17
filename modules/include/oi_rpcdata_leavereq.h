@@ -15,13 +15,13 @@ public:
         sMac = l_sMac;
         
     }
-    virtual ::OI::Base::BytesStream& serialize(::OI::Base::BytesStream& os) const
+    ::OI::Base::BytesStream& serialize(::OI::Base::BytesStream& os) const override
     {
         os.WritePb(0, sRoom);
         os.WritePb(1, sMac);
         return os;
     }
-    virtual ::OI::Base::BytesStream& deserialize(::OI::Base::BytesStream& os)
+    ::OI::Base::BytesStream& deserialize(::OI::Base::BytesStream& os) override
     {
         static constexpr std::array<::OI::Base::PbField, 2> fields = {{
             OI_PB_FIELD(LeaveReq, 0, sRoom),

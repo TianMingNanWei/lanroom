@@ -12,7 +12,7 @@ class RoomClient : public OI::Rpc::ProtoMultiClientManager
 	RoomClient();
 
   public:
-	virtual ~RoomClient();
+	~RoomClient() override;
 	int32_t Init() override;
 	void UseHost(const std::string& sHost);
 	const std::string GetIDString() override;
@@ -24,6 +24,7 @@ class RoomClient : public OI::Rpc::ProtoMultiClientManager
 	}
 
   private:
+	bool m_bHandlersBound = false;
 	::OI::Rpc::RpcTask HandleRoomCast(const ::OI::Rpc::RpcContext& stContext, const ::OI::RpcData::RoomCastReq& stRequest);
 	::OI::Rpc::RpcTask HandleCarry(const ::OI::Rpc::RpcContext& stContext, const ::OI::RpcData::CarryReq& stRequest);
 };

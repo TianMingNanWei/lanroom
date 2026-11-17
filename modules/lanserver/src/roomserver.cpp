@@ -38,10 +38,14 @@ const std::string RoomServer::GetIDString()
 int32_t RoomServer::Init()
 {
 	RoomMgr::GetInstance().Init();
-	OI_RPC_BIND_SELF(Join, RoomServer, HandleJoin);
-	OI_RPC_BIND_SELF(Heartbeat, RoomServer, HandleHeartbeat);
-	OI_RPC_BIND_SELF(Leave, RoomServer, HandleLeave);
-	OI_NOTIFY_BIND_SELF(Carry, RoomServer, HandleCarry);
+	int32_t iCode = OI_OK;
+	if ((iCode = HandleRpc(&RoomServer::HandleJoin)) != OI_OK ||
+	    (iCode = HandleRpc(&RoomServer::HandleHeartbeat)) != OI_OK ||
+	    (iCode = HandleRpc(&RoomServer::HandleLeave)) != OI_OK ||
+	    (iCode = HandleNotify(&RoomServer::HandleCarry)) != OI_OK)
+	{
+		return iCode;
+	}
 	return ::OI::Rpc::ProtoSessionManager::Init();
 }
 

@@ -12,6 +12,7 @@ class RoomUdp : public ::OI::Rpc::ProtoSessionManager
 	DECLARE_SINGLETON(RoomUdp)
 	RoomUdp();
 
+	bool m_bHandlersBound = false;
 	::OI::Rpc::RpcTask HandlePunch(const ::OI::Rpc::RpcContext& stContext, const ::OI::RpcData::PunchReq& stRequest);
 	::OI::Rpc::RpcTask HandleFrame(const ::OI::Rpc::RpcContext& stContext, const ::OI::RpcData::FrameReq& stRequest);
 
@@ -27,9 +28,9 @@ class RoomUdp : public ::OI::Rpc::ProtoSessionManager
 		}
 		return iSessionId;
 	}
-	virtual const std::string GetIDString();
+	const std::string GetIDString() override;
 
   private:
-	virtual void OnAddSession(::OI::Net::Session* pSession);
-	virtual void OnDelSession(const ::OI::Net::Session* pSession);
+	void OnAddSession(::OI::Net::Session* pSession) override;
+	void OnDelSession(const ::OI::Net::Session* pSession) override;
 };

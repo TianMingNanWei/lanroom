@@ -11,6 +11,6 @@ class NicSession : public ::OI::Net::NetSession
 
   public:
 	explicit NicSession(::OI::Net::SessionManager* pManager);
-	virtual void OnDataIn();
-	virtual void OnDataOut();
+	void OnDataIn() override;
+	void OnDataOut() override;
 };
