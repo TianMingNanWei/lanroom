@@ -30,17 +30,13 @@ const std::string RoomClient::GetIDString()
 
 int32_t RoomClient::Init()
 {
-	int32_t iCode = OI_OK;
 	if (!m_bHandlersBound)
 	{
-		if ((iCode = HandleNotify(&RoomClient::HandleRoomCast)) != OI_OK ||
-		    (iCode = HandleNotify(&RoomClient::HandleCarry)) != OI_OK)
-		{
-			return iCode;
-		}
+		RegisterNotifyHandler(&RoomClient::HandleRoomCast);
+		RegisterNotifyHandler(&RoomClient::HandleCarry);
 		m_bHandlersBound = true;
 	}
-	iCode = ::OI::Rpc::ProtoMultiClientManager::Init();
+	int32_t iCode = ::OI::Rpc::ProtoMultiClientManager::Init();
 	if (iCode != OI_OK)
 	{
 		return iCode;

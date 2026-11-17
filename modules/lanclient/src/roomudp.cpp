@@ -49,17 +49,13 @@ bool RoomUdp::Source(sid_t iSessionId, uint32_t& iIp, uint16_t& iPort)
 
 int32_t RoomUdp::Init(const std::string& sBind)
 {
-	int32_t iCode = OI_OK;
 	if (!m_bHandlersBound)
 	{
-		if ((iCode = HandleNotify(&RoomUdp::HandlePunch)) != OI_OK ||
-		    (iCode = HandleNotify(&RoomUdp::HandleFrame)) != OI_OK)
-		{
-			return iCode;
-		}
+		RegisterNotifyHandler(&RoomUdp::HandlePunch);
+		RegisterNotifyHandler(&RoomUdp::HandleFrame);
 		m_bHandlersBound = true;
 	}
-	iCode = ::OI::Rpc::ProtoSessionManager::Init();
+	int32_t iCode = ::OI::Rpc::ProtoSessionManager::Init();
 	if (iCode != OI_OK)
 	{
 		return iCode;
