@@ -5,7 +5,7 @@
 #include "oi_rpcdata_roomcastreq.h"
 #include "oi_singleton.h"
 
-// 连服务器的 TCP 口，写死地址，实例号 0。加入和心跳由 RoomMgr 从这里发。
+// 管理服务器 TCP 连接，供 RoomMgr 发送进房、心跳和中转帧。
 class RoomClient : public OI::Rpc::ProtoMultiClientManager
 {
 	DECLARE_SINGLETON(RoomClient)
@@ -14,7 +14,7 @@ class RoomClient : public OI::Rpc::ProtoMultiClientManager
   public:
 	~RoomClient() override;
 	int32_t Init() override;
-	void UseHost(const std::string& sHost);
+	int32_t UseHost(const std::string& sHost);
 	const std::string GetIDString() override;
 
   protected:

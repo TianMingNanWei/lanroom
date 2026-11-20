@@ -18,10 +18,6 @@ void RoomMgr::Init()
 	int64_t iTtl = 1;
 	::OI::Base::Config::GlobalConfig().GetAs("LanServer.member_ttl", iTtl);
 	m_iMemberTtl = (time_t)iTtl;
-	::OI::Coro::StartTask([](::OI::Coro::Token)
-	{
-		return RoomMgr::GetInstance().Update();
-	});
 }
 
 std::shared_ptr<Room> RoomMgr::Take(const std::string& sRoom)
@@ -255,36 +251,45 @@ void RoomMgr::Broadcast(const std::string& sRoom, const std::vector<sid_t>& vSes
 	co_return iRet;
 }
 
-::OI::Coro::Task RoomMgr::Update()
+::OI::Coro::Task RoomMgr::OnSecondUpdate(time_t iNow)
 {
 	const time_t iCacheTtl = 30;
-	while (true)
+	std::vector<std::shared_ptr<Room>> vFlush;
+	for (auto itRoom = m_mRoom.begin(); itRoom != m_mRoom.end(); )
 	{
-		co_await ::OI::Coro::yield(1000);
-		const time_t iNow = ::OI::Timer::GetTime();
-		std::vector<std::shared_ptr<Room>> vDrop;
-		for (auto itRoom = m_mRoom.begin(); itRoom != m_mRoom.end(); )
+		if (!itRoom->second->Idle(iNow, iCacheTtl))
 		{
-			if (!itRoom->second->Idle(iNow, iCacheTtl))
-			{
-				++itRoom;
-				continue;
-			}
-			vDrop.push_back(itRoom->second);
+			++itRoom;
+			continue;
+		}
+		if (itRoom->second->Changed())
+		{
+			vFlush.push_back(itRoom->second);
+			++itRoom;
+		}
+		else
+		{
 			itRoom = m_mRoom.erase(itRoom);
 		}
-		for (const std::shared_ptr<Room>& pRoom : vDrop)
+	}
+	for (const std::shared_ptr<Room>& pRoom : vFlush)
+	{
+		if (!pRoom->Idle(::OI::Timer::GetTime(), iCacheTtl))
 		{
-			if (!pRoom->Changed() || !pRoom->Ready())
-			{
-				continue;
-			}
-			const int32_t iSaved = co_await pRoom->Saved(::OI::Timer::Seconds(m_iMemberTtl));
+			continue;
+		}
+		if (pRoom->Changed())
+		{
+			const int32_t iSaved = co_await pRoom->Saved(::OI::Timer::Seconds(m_iMemberTtl), true);
 			if (iSaved != OI_OK)
 			{
-				LOG_WARNING("RoomMgr::Update save room=%s code=%d", pRoom->Name().c_str(), iSaved);
-				m_mRoom.emplace(pRoom->Name(), pRoom);
+				LOG_WARNING("RoomMgr::OnSecondUpdate save room=%s code=%d", pRoom->Name().c_str(), iSaved);
+				continue;
 			}
+		}
+		if (!pRoom->Changed() && pRoom->Idle(::OI::Timer::GetTime(), iCacheTtl))
+		{
+			m_mRoom.erase(pRoom->Name());
 		}
 	}
 	co_return;

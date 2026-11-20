@@ -97,7 +97,11 @@ int RunClientWindow(const char* pConfig, const std::string& sServer, int iPort, 
 						    }
 						    else
 						    {
-							    RoomClient::GetInstance().UseHost(stArgs[1].asString());
+							    const int32_t iCode = RoomClient::GetInstance().UseHost(stArgs[1].asString());
+							    if (iCode != OI_OK)
+							    {
+								    sResult = "切换服务器失败 code=" + std::to_string(iCode);
+							    }
 						    }
 					    }
 				    }
@@ -138,10 +142,14 @@ int RunClientWindow(const char* pConfig, const std::string& sServer, int iPort, 
 						{
 							sResult = "连接初始化失败 code=" + std::to_string(iInitCode);
 						}
+						    else if ((iInitCode = RoomClient::GetInstance().UseHost(sHost)) != OI_OK ||
+						             (iInitCode = RoomClient::GetInstance().Start()) != OI_OK)
+						    {
+							    sResult = "连接启动失败 code=" + std::to_string(iInitCode);
+						    }
 						    else
 						    {
-							    RoomClient::GetInstance().UseHost(sHost);
-							    RoomClient::GetInstance().Start();
+							    RoomMgr::GetInstance().Start();
 							    bJoined.store(true);
 						    }
 					    }

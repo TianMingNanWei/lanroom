@@ -5,6 +5,15 @@
 #include "oi_timer_helper.h"
 #include "rpc_enums.h"
 
+namespace
+{
+struct RoomBusy
+{
+	Room& stRoom;
+	~RoomBusy() { stRoom.ReleaseBusy(); }
+};
+}
+
 void Room::Remember(const ::Lan::MacAddress& stMac, uint32_t iSourceIp, uint16_t iSourcePort)
 {
 	if (iSourcePort == 0)
@@ -283,6 +292,7 @@ void Room::WritePeers(std::vector<::OI::RpcData::RoomPeer>& vPeers) const
 void Room::Touch()
 {
 	m_stRecord.stAttr.iVersion += 1;
+	++m_iRevision;
 	TouchAccess();
 }
 
@@ -361,6 +371,8 @@ void Room::ReleaseBusy()
 
 ::OI::Coro::TaskResult<int32_t> Room::Loaded(const std::string& sRoom)
 {
+	co_await Occupy();
+	RoomBusy stBusy{*this};
 	m_sRoom = sRoom;
 	TouchAccess();
 	if (m_bLoaded)
@@ -373,7 +385,6 @@ void Room::ReleaseBusy()
 	{
 		m_stRecord = ::OI::RpcData::RoomRecord();
 		m_bLoaded = true;
-		m_iLastSave = m_iLastAccess;
 		co_return OI_OK;
 	}
 	if (iRet != OI_OK)
@@ -382,7 +393,6 @@ void Room::ReleaseBusy()
 	}
 	m_stRecord = stLoaded;
 	m_bLoaded = true;
-	m_iLastSave = m_iLastAccess;
 	co_return OI_OK;
 }
 
@@ -393,32 +403,45 @@ bool Room::Ready() const
 
 bool Room::Changed() const
 {
-	return m_iLastAccess > m_iLastSave;
+	return m_iRevision != m_iSavedRevision;
 }
 
 bool Room::Idle(time_t iNow, time_t iTtl) const
 {
-	return m_iLastAccess == 0 || iNow - m_iLastAccess >= iTtl;
+	return !m_bBusy && (m_iLastAccess == 0 || iNow - m_iLastAccess >= iTtl);
 }
 
-::OI::Coro::TaskResult<int32_t> Room::Saved(::OI::Timer::MS stTimeToLive)
+::OI::Coro::TaskResult<int32_t> Room::Saved(::OI::Timer::MS stTimeToLive, bool bEvicting)
 {
+	co_await Occupy();
+	RoomBusy stBusy{*this};
+	const uint64_t iRevision = m_iRevision;
+	int32_t iRet = OI_OK;
 	if (m_stRecord.vMembers.empty())
 	{
-		const int32_t iRet = co_await ::OI::Redis::RedisDel(m_sRoom);
-		if (iRet == OI_OK || iRet == OI_ERR_NOT_FOUND)
+		iRet = co_await ::OI::Redis::RedisDel(m_sRoom);
+		if (iRet == OI_ERR_NOT_FOUND)
 		{
-			m_iLastSave = ::OI::Timer::GetTime();
-			co_return OI_OK;
+			iRet = OI_OK;
 		}
-		co_return iRet;
 	}
-	m_stRecord.iRelayCount += m_iPendingRelay;
-	m_iPendingRelay = 0;
-	const int32_t iRet = co_await ::OI::Redis::RedisSet(m_sRoom, m_stRecord, stTimeToLive);
+	else if (bEvicting)
+	{
+		// 空闲淘汰只补写仍然存在的记录，保留心跳设置的过期时间。
+		::OI::Base::BytesStream stData;
+		m_stRecord.serialize(stData);
+		std::vector<std::string> vCommand{
+		    "SET", m_sRoom, std::string(stData.Begin(), stData.Size()), "XX", "KEEPTTL"};
+		const auto stResult = co_await ::OI::Redis::CallRedis(std::move(vCommand));
+		iRet = stResult.GetRet();
+	}
+	else
+	{
+		iRet = co_await ::OI::Redis::RedisSet(m_sRoom, m_stRecord, stTimeToLive);
+	}
 	if (iRet == OI_OK)
 	{
-		m_iLastSave = ::OI::Timer::GetTime();
+		m_iSavedRevision = iRevision;
 	}
 	co_return iRet;
 }
@@ -492,7 +515,8 @@ const ::OI::RpcData::RoomMember* Room::FindVirtual(uint32_t iVirtualIp) const
 
 void Room::CountRelay()
 {
-	m_iPendingRelay += 1;
+	++m_stRecord.iRelayCount;
+	++m_iRevision;
 	TouchAccess();
 }
 

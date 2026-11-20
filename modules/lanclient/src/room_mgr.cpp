@@ -257,8 +257,9 @@ void RoomMgr::SendFrame(const std::vector<uint8_t>& vFrame)
 			RoomUdp& stUdp = RoomUdp::GetInstance();
 			iCode = stUdp.Notify(stUdp.Peer(stTarget.iPeerIp, stTarget.iPeerPort), stFrame);
 		}
-		else
+		if (!stTarget.bDirect || iCode != OI_OK)
 		{
+			sVia = stTarget.bDirect ? "tcp-fallback" : "tcp";
 			::OI::RpcData::CarryReq stCarry;
 			stCarry.sRoom = sRoom;
 			stCarry.sMac = sSelf;
@@ -367,7 +368,7 @@ void RoomMgr::Punch()
 		else
 		{
 			::OI::RpcData::HeartbeatReq stRequest;
-			stRequest.sRoom = m_sRoom;
+			stRequest.sRoom = sRoom;
 			stRequest.sMac = sMac;
 			stRequest.iSawPunch = bSaw ? 1 : 0;
 			::OI::RpcData::HeartbeatRes stResponse;

@@ -27,9 +27,8 @@ class Room
 	bool m_bBusy = false;
 	bool m_bLoaded = false;
 	time_t m_iLastAccess = 0;
-	time_t m_iLastSave = 0;
-	// 转发不读写 Redis，计数先记在这里，下次 Saved 再并进记录。
-	uint32_t m_iPendingRelay = 0;
+	uint64_t m_iRevision = 0;
+	uint64_t m_iSavedRevision = 0;
 	std::map<std::string, std::vector<SeenEndpoint>> m_mSeen;
 	uint64_t m_iSeenSeq = 0;
 
@@ -58,7 +57,7 @@ class Room
 	bool Ready() const;
 	bool Changed() const;
 	bool Idle(time_t iNow, time_t iTtl) const;
-	::OI::Coro::TaskResult<int32_t> Saved(::OI::Timer::MS stTimeToLive);
+	::OI::Coro::TaskResult<int32_t> Saved(::OI::Timer::MS stTimeToLive, bool bEvicting = false);
 	int32_t Join(uint32_t iSourceIp, uint16_t iSourcePort, const ::Lan::MacAddress& stMac, bool bTcpRelay, time_t iNow, uint32_t& iVirtualIp, std::vector<::OI::RpcData::RoomPeer>& vPeers);
 	int32_t Update(uint32_t iSourceIp, uint16_t iSourcePort, const ::Lan::MacAddress& stMac, bool bSawPunch, time_t iNow, time_t iTtl, uint32_t& iVirtualIp, std::vector<::OI::RpcData::RoomPeer>& vPeers);
 	bool Remove(uint32_t iSourceIp, const ::Lan::MacAddress& stMac);

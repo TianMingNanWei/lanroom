@@ -102,8 +102,13 @@ int main(int iArgumentCount, char* vArguments[])
 				fprintf(stderr, "RoomClient Init error code=%d\n", iCode);
 				return 1;
 			}
-			RoomClient::GetInstance().UseHost(sServer);
-			RoomClient::GetInstance().Start();
+			if ((iCode = RoomClient::GetInstance().UseHost(sServer)) != OI_OK ||
+			    (iCode = RoomClient::GetInstance().Start()) != OI_OK)
+			{
+				fprintf(stderr, "RoomClient start failed code=%d\n", iCode);
+				return iCode;
+			}
+			RoomMgr::GetInstance().Start();
 		}
 		catch (const std::exception& stError)
 		{

@@ -36,20 +36,14 @@ int32_t RoomClient::Init()
 		RegisterNotifyHandler(&RoomClient::HandleCarry);
 		m_bHandlersBound = true;
 	}
-	int32_t iCode = ::OI::Rpc::ProtoMultiClientManager::Init();
-	if (iCode != OI_OK)
-	{
-		return iCode;
-	}
-	RoomMgr::GetInstance().Start();
-	return OI_OK;
+	return ::OI::Rpc::ProtoMultiClientManager::Init();
 }
 
-void RoomClient::UseHost(const std::string& sHost)
+int32_t RoomClient::UseHost(const std::string& sHost)
 {
 	if (sHost.empty())
 	{
-		return;
+		return OI_OK;
 	}
-	UseAddress(sHost, GetStrPort());
+	return UseAddress(sHost, GetStrPort());
 }

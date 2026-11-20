@@ -38,5 +38,5 @@ class RoomMgr
 	::OI::Rpc::RpcTask Join(const ::OI::Rpc::RpcContext& stContext, const ::OI::RpcData::JoinReq& stRequest, ::OI::RpcData::JoinRes& stResponse);
 	::OI::Rpc::RpcTask Heartbeat(const ::OI::Rpc::RpcContext& stContext, const ::OI::RpcData::HeartbeatReq& stRequest, ::OI::RpcData::HeartbeatRes& stResponse);
 	::OI::Rpc::RpcTask Leave(const ::OI::Rpc::RpcContext& stContext, const ::OI::RpcData::LeaveReq& stRequest, ::OI::RpcData::LeaveRes& stResponse);
-	::OI::Coro::Task Update();
+	::OI::Coro::Task OnSecondUpdate(time_t iNow);
 };

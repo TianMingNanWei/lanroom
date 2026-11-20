@@ -172,6 +172,10 @@ class Nic:
         count = int(head.split()[1])
         return [self.line() for _ in range(count)]
 
+    def port(self):
+        line = self.cmd("PORT")
+        return int(line.split()[1]) if line.startswith("port ") else 0
+
 
 def start_client(room, mac, nic_port, bind="0.0.0.0", drop=False, tcp=False):
     args = [str(CLIENT), "--config", "config/client.toml", "--server", "127.0.0.1", "--server-port", str(SERVER_PORT), "--room", room, "--mac", mac, "--nic-port", str(nic_port), "--bind", bind]
@@ -207,17 +211,17 @@ def start_client(room, mac, nic_port, bind="0.0.0.0", drop=False, tcp=False):
     raise RuntimeError("client not joined: " + "".join(proc.lines[-20:]))
 
 
-def wait_members(room, count, timeout=4):
+def wait_members(room, count, timeout=4, matches=None):
     deadline = time.time() + timeout
     last = None
     while time.time() < deadline:
         last = decode_room(redis_call("GET", room))
-        if last is not None and len(last["members"]) == count:
+        if last is not None and len(last["members"]) == count and (matches is None or matches(last)):
             return last
         if count == 0 and last is None:
             return None
         time.sleep(0.1)
-    return last
+    return last if matches is None else None
 
 
 def check(name, ok):
@@ -357,12 +361,17 @@ def case_room(server):
     check("3 empty room rejected", server.proc.poll() is None and (redis_call("EXISTS", "") in (b":0", None) or redis_call("GET", "") is None))
     check("4 client has no redis code", b"RedisClient" not in CLIENT.read_bytes())
     e, ne = start_client("alpha", "02:00:00:00:00:01", 18105, "127.0.0.1")
-    again = wait_members("alpha", 1)
-    port1 = again["members"][0]["port"] if again else 0
+    port1 = ne.port()
+    again = wait_members("alpha", 1, matches=lambda room: room["members"][0]["port"] == port1)
     cleanup(ne, e)
     f, nf = start_client("alpha", "02:00:00:00:00:01", 18106, "127.0.0.1")
-    moved = wait_members("alpha", 1)
-    check("5 rejoin keeps user", moved is not None and len(moved["members"]) == 1 and moved["members"][0]["port"] != port1)
+    port2 = nf.port()
+    moved = wait_members("alpha", 1, matches=lambda room: room["members"][0]["port"] == port2)
+    check(
+        "5 rejoin keeps user",
+        again is not None and moved is not None and port1 != port2
+        and again["members"][0]["mac"] == moved["members"][0]["mac"],
+    )
     g, ng = start_client("alpha", "02:00:00:00:00:09", 18107, "127.0.0.3")
     wait_members("alpha", 2)
     cleanup(nf, f)
@@ -397,25 +406,33 @@ def case_room(server):
 
 
 def case_address():
-    redis_call("DEL", "alpha")
-    a, na = start_client("alpha", "02:00:00:00:00:11", 18121, "127.0.0.1")
-    b, nb = start_client("alpha", "02:00:00:00:00:12", 18122, "127.0.0.2")
-    room = wait_members("alpha", 2)
+    name = "address"
+    mac = bytes.fromhex("020000000011")
+    redis_call("DEL", name)
+    a, na = start_client(name, "02:00:00:00:00:11", 18121, "127.0.0.1")
+    b, nb = start_client(name, "02:00:00:00:00:12", 18122, "127.0.0.2")
+    room = wait_members(name, 2)
     subnet = room is not None and all((item["virtual"] & 0xFFFFFF00) == 0x0A420000 for item in room["members"])
     distinct = room is not None and room["members"][0]["virtual"] != room["members"][1]["virtual"]
-    kept = room["members"][0]["virtual"] if room else 0
+    kept = next((item["virtual"] for item in room["members"] if item["mac"] == mac), 0) if room else 0
     cleanup(na, a)
-    c, nc = start_client("alpha", "02:00:00:00:00:11", 18123, "127.0.0.1")
-    again = wait_members("alpha", 2)
-    same = again and any(item["virtual"] == kept for item in again["members"])
+    c, nc = start_client(name, "02:00:00:00:00:11", 18123, "127.0.0.1")
+    local_port = nc.port()
+    again = wait_members(
+        name, 2,
+        matches=lambda room: any(item["mac"] == mac and item["port"] == local_port for item in room["members"]),
+    )
+    mine = next((item for item in again["members"] if item["mac"] == mac), None) if again else None
+    deadline = time.monotonic() + 2
     peer_lines = nc.peers()
+    while not peer_lines and time.monotonic() < deadline:
+        time.sleep(0.05)
+        peer_lines = nc.peers()
     check("11 observed source ip", room is not None and {item["ip"] for item in room["members"]} == {0x7F000001, 0x7F000002})
-    check("12 virtual addresses", bool(subnet and distinct and same and peer_lines))
-    port_line = nc.cmd("PORT")
-    local_port = int(port_line.split()[1]) if port_line.startswith("port ") else 0
-    mine = next((item for item in again["members"] if item["mac"] == bytes.fromhex("020000000011")), None) if again else None
+    check("12 virtual addresses", bool(subnet and distinct and mine and mine["virtual"] == kept and peer_lines))
     check("14 registration port is the socket port", mine is not None and mine["port"] == local_port)
     cleanup(nb, nc, b, c)
+    redis_call("DEL", name)
 
 
 def case_forward():
