@@ -47,6 +47,8 @@ services:
       AUTH_SECRET: ${AUTH_SECRET}
       ADMIN_EMAIL: ${ADMIN_EMAIL}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      SERVER_IP: ${SERVER_IP:-}
+      SERVER_NAME: ${SERVER_NAME:-Lanroom 主节点}
       GEOIP_DB: /geoip/GeoLite2-City.mmdb
     volumes:
       - ./geoip:/geoip:ro

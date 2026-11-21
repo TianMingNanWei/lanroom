@@ -10,6 +10,17 @@ export default defineConfig({
       "@": fileURLToPath(new URL("./src", import.meta.url)),
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          three: ["three"],
+          maplibre: ["maplibre-gl"],
+          world: ["world-atlas/countries-110m.json", "topojson-client"],
+        },
+      },
+    },
+  },
   server: {
     port: 5173,
     proxy: {

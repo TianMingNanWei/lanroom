@@ -18,7 +18,7 @@ func testServer(t *testing.T) (*Server, *httptest.Server) {
 	t.Helper()
 	dir := t.TempDir()
 	fixture := filepath.Join(dir, "geo.json")
-	raw := []byte(`{"8.8.8.8":{"country":"US","city":"Mountain View","lat":37.386,"lon":-122.084},"127.0.0.1":{"country":"CN","city":"Local","lat":31.23,"lon":121.47}}`)
+	raw := []byte(`{"8.8.8.8":{"country":"US","city":"Mountain View","lat":37.386,"lon":-122.084},"1.1.1.1":{"country":"AU","city":"Sydney","lat":-33.8688,"lon":151.2093},"49.233.79.122":{"country":"CN","city":"Beijing","lat":39.9042,"lon":116.4074},"127.0.0.1":{"country":"CN","city":"Local","lat":31.23,"lon":121.47}}`)
 	if err := os.WriteFile(fixture, raw, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -29,6 +29,8 @@ func testServer(t *testing.T) (*Server, *httptest.Server) {
 		AdminUser:     "admin@example.com",
 		AdminPassword: "admin-pass",
 		GeoIPFixture:  fixture,
+		ServerIP:      "49.233.79.122",
+		ServerName:    "Beijing Core",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -153,20 +155,58 @@ func TestMemberOperatorMapJWTAndLoginLog(t *testing.T) {
 	if code != 200 || len(items) == 0 || items[0].(map[string]any)["name"] != "studio" {
 		t.Fatalf("ops rooms: %d %v", code, body)
 	}
-	server.store.Set(t.Context(), liveKey("studio"), "02:11:22:33:44:55 10.66.0.1 8.8.8.8:4242\n", 0)
+	server.store.Set(t.Context(), liveKey("studio"), "02:11:22:33:44:55 10.66.0.1 8.8.8.8:4242 1 0 0\n02:aa:bb:cc:dd:ee 10.66.0.2 1.1.1.1:5353 1 0 0\n", 0)
 	code, body = call(t, ts, http.MethodGet, "/api/map", opsToken, nil)
 	if code != 200 {
 		t.Fatalf("map: %d %v", code, body)
 	}
+	srv, _ := body["server"].(map[string]any)
+	if srv == nil || srv["city"] != "Beijing" || srv["name"] != "Beijing Core" {
+		t.Fatalf("server node missing or wrong: %v", srv)
+	}
+	links, _ := body["links"].([]any)
+	hasDirect := false
+	hasControl := false
+	for _, rawLink := range links {
+		link := rawLink.(map[string]any)
+		if link["kind"] == "direct" {
+			hasDirect = true
+		}
+		if link["kind"] == "control" {
+			hasControl = true
+		}
+	}
+	if !hasDirect || !hasControl {
+		t.Fatalf("expected direct and control links, got: %v", links)
+	}
 	members, _ := body["members"].([]any)
 	point := members[0].(map[string]any)
-	if point["city"] != "Mountain View" || point["lat"] != 37.386 {
+	if point["city"] != "Mountain View" || point["lat"] != 37.386 || point["mode"] != "direct" {
 		t.Fatalf("point: %v", point)
 	}
 	countries, _ := body["countries"].([]any)
 	if countries[0].(map[string]any)["country"] != "US" {
 		t.Fatalf("countries: %v", countries)
 	}
+
+	// Verify relay mode links when direct=0 or tcpRelay=1
+	server.store.Set(t.Context(), liveKey("studio"), "02:11:22:33:44:55 10.66.0.1 8.8.8.8:4242 0 1 15\n02:aa:bb:cc:dd:ee 10.66.0.2 1.1.1.1:5353 0 1 15\n", 0)
+	code, body = call(t, ts, http.MethodGet, "/api/map", opsToken, nil)
+	if code != 200 {
+		t.Fatalf("relay map: %d %v", code, body)
+	}
+	relayLinks := 0
+	for _, rawLink := range body["links"].([]any) {
+		if rawLink.(map[string]any)["kind"] == "relay" {
+			relayLinks++
+		}
+	}
+	if relayLinks != 2 {
+		t.Fatalf("expected 2 relay links, got %d: %v", relayLinks, body["links"])
+	}
+
+	// Verify backward-compatible 3-column LiveText
+	server.store.Set(t.Context(), liveKey("studio"), "02:11:22:33:44:55 10.66.0.1 8.8.8.8:4242\n", 0)
 	code, body = call(t, ts, http.MethodGet, "/api/map", memberToken, nil)
 	memberRows, _ := body["members"].([]any)
 	if code != 200 || memberRows[0].(map[string]any)["room"] != "studio" {

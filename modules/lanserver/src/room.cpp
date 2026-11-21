@@ -581,6 +581,12 @@ std::string Room::LiveText() const
 		sText += ::Lan::Ipv4::Text(stMember.iSourceIp);
 		sText += ":";
 		sText += std::to_string(stMember.iSourcePort);
+		sText += " ";
+		sText += stMember.iDirect != 0 ? "1" : "0";
+		sText += " ";
+		sText += m_stRecord.stAttr.iTcpRelay != 0 ? "1" : "0";
+		sText += " ";
+		sText += std::to_string(m_stRecord.iRelayCount);
 		sText += "\n";
 	}
 	return sText;

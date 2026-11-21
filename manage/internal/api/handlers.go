@@ -822,12 +822,37 @@ func (s *Server) rooms(c *gin.Context) {
 			continue
 		}
 		owner, _ := s.loadUser(room.OwnerID)
+		text, _ := s.store.Get(c.Request.Context(), liveKey(room.Name))
+		live := parseLive(text)
+		mode := "idle"
+		if len(live) >= 2 {
+			allDirect := true
+			for _, m := range live {
+				if !m.Direct || m.TCPRelay {
+					allDirect = false
+					break
+				}
+			}
+			if allDirect {
+				mode = "direct"
+			} else {
+				mode = "relay"
+			}
+		} else if len(live) == 1 {
+			if live[0].TCPRelay {
+				mode = "relay"
+			} else {
+				mode = "standby"
+			}
+		}
 		items = append(items, map[string]any{
-			"name":      room.Name,
-			"owner":     owner.Username,
-			"ownerId":   room.OwnerID,
-			"createdAt": stamp(room.Created),
-			"mine":      room.OwnerID == actor.user.ID,
+			"name":        room.Name,
+			"owner":       owner.Username,
+			"ownerId":     room.OwnerID,
+			"createdAt":   stamp(room.Created),
+			"mine":        room.OwnerID == actor.user.ID,
+			"onlineCount": len(live),
+			"mode":        mode,
 		})
 	}
 	writeJSON(c, http.StatusOK, map[string]any{"items": items})
@@ -937,10 +962,13 @@ func (s *Server) ticket(c *gin.Context) {
 }
 
 type liveMember struct {
-	MAC       string
-	VirtualIP string
-	Source    string
-	IP        string
+	MAC        string
+	VirtualIP  string
+	Source     string
+	IP         string
+	Direct     bool
+	TCPRelay   bool
+	RelayCount uint64
 }
 
 func parseLive(text string) []liveMember {
@@ -954,9 +982,60 @@ func parseLive(text string) []liveMember {
 		if idx := strings.LastIndex(ip, ":"); idx > 0 {
 			ip = ip[:idx]
 		}
-		members = append(members, liveMember{MAC: parts[0], VirtualIP: parts[1], Source: parts[2], IP: ip})
+		item := liveMember{MAC: parts[0], VirtualIP: parts[1], Source: parts[2], IP: ip}
+		if len(parts) >= 4 {
+			item.Direct = parts[3] == "1"
+		}
+		if len(parts) >= 5 {
+			item.TCPRelay = parts[4] == "1"
+		}
+		if len(parts) >= 6 {
+			if count, err := strconv.ParseUint(parts[5], 10, 64); err == nil {
+				item.RelayCount = count
+			}
+		}
+		members = append(members, item)
 	}
 	return members
+}
+
+type serverNode struct {
+	Name    string   `json:"name"`
+	IP      string   `json:"ip"`
+	Country string   `json:"country"`
+	City    string   `json:"city"`
+	Lat     *float64 `json:"lat"`
+	Lon     *float64 `json:"lon"`
+}
+
+func (s *Server) serverInfo() *serverNode {
+	if s.serverIP == "" && !s.hasServerCoord {
+		return nil
+	}
+	info := &serverNode{
+		Name:    s.serverName,
+		IP:      s.serverIP,
+		Country: s.serverCountry,
+		City:    s.serverCity,
+	}
+	if s.hasServerCoord {
+		lat, lon := s.serverLat, s.serverLon
+		info.Lat = &lat
+		info.Lon = &lon
+		return info
+	}
+	if place := s.geo.lookup(s.serverIP); place != nil {
+		if info.Country == "" {
+			info.Country = place.Country
+		}
+		if info.City == "" {
+			info.City = place.City
+		}
+		lat, lon := place.Lat, place.Lon
+		info.Lat = &lat
+		info.Lon = &lon
+	}
+	return info
 }
 
 func (s *Server) members(c *gin.Context) {
@@ -975,9 +1054,17 @@ func (s *Server) members(c *gin.Context) {
 		return
 	}
 	text, _ := s.store.Get(c.Request.Context(), liveKey(room.Name))
-	items := []map[string]string{}
+	items := []map[string]any{}
 	for _, member := range parseLive(text) {
-		items = append(items, map[string]string{"mac": member.MAC, "virtualIp": member.VirtualIP, "source": member.Source, "ip": member.IP})
+		items = append(items, map[string]any{
+			"mac":        member.MAC,
+			"virtualIp":  member.VirtualIP,
+			"source":     member.Source,
+			"ip":         member.IP,
+			"direct":     member.Direct,
+			"tcpRelay":   member.TCPRelay,
+			"relayCount": member.RelayCount,
+		})
 	}
 	writeJSON(c, http.StatusOK, map[string]any{"items": items})
 }
@@ -1057,22 +1144,68 @@ func (s *Server) worldMap(c *gin.Context) {
 		}
 		rows = kept
 	}
+	server := s.serverInfo()
+	type locatedNode struct {
+		id         string
+		room       string
+		virtualIP  string
+		mac        string
+		lat        float64
+		lon        float64
+		direct     bool
+		tcpRelay   bool
+		relayCount uint64
+	}
+	type linkEndpoint struct {
+		Lat   float64 `json:"lat"`
+		Lon   float64 `json:"lon"`
+		Label string  `json:"label"`
+	}
+	type mapLink struct {
+		ID         string       `json:"id"`
+		Kind       string       `json:"kind"`
+		Room       string       `json:"room"`
+		FromID     string       `json:"fromId"`
+		ToID       string       `json:"toId"`
+		From       linkEndpoint `json:"from"`
+		To         linkEndpoint `json:"to"`
+		RelayCount uint64       `json:"relayCount"`
+	}
 	members := []map[string]any{}
+	links := []mapLink{}
 	for _, room := range rows {
 		owner, _ := s.loadUser(room.OwnerID)
 		text, _ := s.store.Get(c.Request.Context(), liveKey(room.Name))
-		for _, member := range parseLive(text) {
+		roomLive := parseLive(text)
+		roomNodes := make([]locatedNode, 0, len(roomLive))
+		for _, member := range roomLive {
 			place := s.geo.lookup(member.IP)
+			mode := "standby"
+			if len(roomLive) >= 2 {
+				if member.Direct && !member.TCPRelay {
+					mode = "direct"
+				} else {
+					mode = "relay"
+				}
+			} else if member.TCPRelay {
+				mode = "relay"
+			}
+			nodeID := room.Name + ":" + member.MAC
 			item := map[string]any{
-				"room":      room.Name,
-				"owner":     owner.Username,
-				"mac":       member.MAC,
-				"virtualIp": member.VirtualIP,
-				"source":    member.Source,
-				"country":   "",
-				"city":      "",
-				"lat":       nil,
-				"lon":       nil,
+				"id":         nodeID,
+				"room":       room.Name,
+				"owner":      owner.Username,
+				"mac":        member.MAC,
+				"virtualIp":  member.VirtualIP,
+				"source":     member.Source,
+				"direct":     member.Direct,
+				"tcpRelay":   member.TCPRelay,
+				"relayCount": member.RelayCount,
+				"mode":       mode,
+				"country":    "",
+				"city":       "",
+				"lat":        nil,
+				"lon":        nil,
 			}
 			if place != nil {
 				item["country"] = place.Country
@@ -1083,8 +1216,53 @@ func (s *Server) worldMap(c *gin.Context) {
 					writeErr(c, err)
 					return
 				}
+				roomNodes = append(roomNodes, locatedNode{
+					id:         nodeID,
+					room:       room.Name,
+					virtualIP:  member.VirtualIP,
+					mac:        member.MAC,
+					lat:        place.Lat,
+					lon:        place.Lon,
+					direct:     member.Direct,
+					tcpRelay:   member.TCPRelay,
+					relayCount: member.RelayCount,
+				})
 			}
 			members = append(members, item)
+		}
+		// Build 3D communication topology links for this room
+		for i := 0; i < len(roomNodes); i++ {
+			a := roomNodes[i]
+			if server != nil && server.Lat != nil && server.Lon != nil {
+				kind := "control"
+				if len(roomLive) >= 2 && (!a.direct || a.tcpRelay) {
+					kind = "relay"
+				}
+				links = append(links, mapLink{
+					ID:         kind + ":" + a.id + ":server",
+					Kind:       kind,
+					Room:       room.Name,
+					FromID:     a.id,
+					ToID:       "server",
+					From:       linkEndpoint{Lat: a.lat, Lon: a.lon, Label: a.virtualIP},
+					To:         linkEndpoint{Lat: *server.Lat, Lon: *server.Lon, Label: server.Name},
+					RelayCount: a.relayCount,
+				})
+			}
+			for j := i + 1; j < len(roomNodes); j++ {
+				b := roomNodes[j]
+				if a.direct && b.direct && !a.tcpRelay && !b.tcpRelay {
+					links = append(links, mapLink{
+						ID:     "direct:" + a.id + ":" + b.id,
+						Kind:   "direct",
+						Room:   room.Name,
+						FromID: a.id,
+						ToID:   b.id,
+						From:   linkEndpoint{Lat: a.lat, Lon: a.lon, Label: a.virtualIP},
+						To:     linkEndpoint{Lat: b.lat, Lon: b.lon, Label: b.virtualIP},
+					})
+				}
+			}
 		}
 	}
 	type cityBucket struct {
@@ -1175,7 +1353,7 @@ func (s *Server) worldMap(c *gin.Context) {
 		logins = []map[string]any{}
 	}
 	writeJSON(c, http.StatusOK, map[string]any{
-		"members": members, "cities": cities, "countries": countries, "logins": logins, "rooms": names,
+		"server": server, "members": members, "links": links, "cities": cities, "countries": countries, "logins": logins, "rooms": names,
 	})
 }
 
@@ -1232,8 +1410,15 @@ func (s *Server) loginLogs(c *gin.Context) {
 	}
 	items := []map[string]any{}
 	for _, row := range all[start:end] {
+		place := s.geo.lookup(row.IP)
+		country, city := "", ""
+		if place != nil {
+			country = place.Country
+			city = place.City
+		}
 		items = append(items, map[string]any{
-			"username": row.Username, "result": row.Result, "ip": row.IP, "createdAt": stamp(row.CreatedAt),
+			"username": row.Username, "result": row.Result, "ip": row.IP,
+			"country": country, "city": city, "createdAt": stamp(row.CreatedAt),
 		})
 	}
 	writeJSON(c, http.StatusOK, map[string]any{"total": len(all), "items": items})
