@@ -53,7 +53,8 @@ services:
     volumes:
       - ./geoip:/geoip:ro
     ports:
-      - "8080:8080"
+      # 只绑定本机，对外统一走 nginx 的 443（见 deploy/ssl/）
+      - "127.0.0.1:8080:8080"
     restart: unless-stopped
 
 volumes:
