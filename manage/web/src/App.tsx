@@ -14,6 +14,7 @@ import {
   LogOut,
   Map as MapIcon,
   MapPin,
+  Minus,
   Network,
   Pause,
   Play,
@@ -44,6 +45,7 @@ import {
   type User,
 } from "./api";
 import { Globe3D, type Globe3DHandle, type SelectedEntity } from "./Globe3D";
+import type { DetailMapStyle, ZoomTelemetry } from "./globeTiles";
 import { useLivePanel, type LiveEvent, type LivePanelController, type WsStatus } from "./ws";
 
 const LazyMapView = lazy(() => import("./MapView").then((m) => ({ default: m.MapView })));
@@ -499,6 +501,8 @@ function MapPage({
   const [logins, setLogins] = useState(false);
   const [autoRotate, setAutoRotate] = useState(true);
   const [showControlLinks, setShowControlLinks] = useState(true);
+  const [detailMapStyle, setDetailMapStyle] = useState<DetailMapStyle>("zh");
+  const [zoomInfo, setZoomInfo] = useState<ZoomTelemetry>({ zoom: 3, scaleLabel: "全球视野", tilesActive: false });
   const [selected, setSelected] = useState<SelectedEntity | null>(null);
   const [showList, setShowList] = useState(true);
   const [showFeed, setShowFeed] = useState(true);
@@ -604,8 +608,10 @@ function MapPage({
           isLoginMode={isLoginMode}
           autoRotate={autoRotate}
           showControlLinks={showControlLinks}
+          detailMapStyle={detailMapStyle}
           selectedId={selectedId}
           recentJoinIds={live.recentJoinIds}
+          onZoomChange={setZoomInfo}
           onSelect={setSelected}
         />
       ) : (
@@ -735,6 +741,33 @@ function MapPage({
                 <Button
                   size="icon"
                   variant="ghost"
+                  title={
+                    detailMapStyle === "zh"
+                      ? "当前：暗黑中文详图（点击切换卫星实景）"
+                      : detailMapStyle === "satellite"
+                        ? "当前：卫星实景底图（点击切换暗黑全球）"
+                        : detailMapStyle === "dark"
+                          ? "当前：暗黑全球底图（点击切换纯矢量）"
+                          : "当前：纯矢量地球（点击开启中文详图）"
+                  }
+                  onClick={() =>
+                    setDetailMapStyle((prev) =>
+                      prev === "zh" ? "satellite" : prev === "satellite" ? "dark" : prev === "dark" ? "off" : "zh",
+                    )
+                  }
+                  className={`h-8 w-8 rounded-xl ${
+                    detailMapStyle === "satellite"
+                      ? "bg-amber-500/20 text-amber-300"
+                      : detailMapStyle === "zh" || detailMapStyle === "dark"
+                        ? "bg-emerald-500/20 text-emerald-300"
+                        : "text-slate-400 hover:text-white"
+                  }`}
+                >
+                  <Layers className="h-3.5 w-3.5" />
+                </Button>
+                <Button
+                  size="icon"
+                  variant="ghost"
                   title={autoRotate ? "暂停地球自转" : "开启地球自转"}
                   onClick={() => setAutoRotate((v) => !v)}
                   className={`h-8 w-8 rounded-xl ${autoRotate ? "bg-cyan-500/20 text-cyan-300" : "text-slate-400 hover:text-white"}`}
@@ -797,12 +830,12 @@ function MapPage({
             <div className="space-y-1 overflow-y-auto pr-1 text-xs">
               {server && !isLoginMode && (
                 <button
-                  onClick={() => {
-                    setSelected({ kind: "server", server });
-                    if (server.lat != null && server.lon != null) {
-                      globeRef.current?.focusLatLon(server.lat, server.lon, 2.25);
-                    }
-                  }}
+                    onClick={() => {
+                      setSelected({ kind: "server", server });
+                      if (server.lat != null && server.lon != null) {
+                        globeRef.current?.focusLatLon(server.lat, server.lon, 1.32);
+                      }
+                    }}
                   className="flex w-full items-center justify-between rounded-xl border border-violet-500/30 bg-violet-500/12 px-2.5 py-2 text-left transition hover:bg-violet-500/22"
                 >
                   <div className="min-w-0">
@@ -841,7 +874,7 @@ function MapPage({
                       onClick={() => {
                         setSelected({ kind: "member", member: m });
                         if (m.lat != null && m.lon != null) {
-                          globeRef.current?.focusLatLon(m.lat, m.lon, 2.2);
+                          globeRef.current?.focusLatLon(m.lat, m.lon, 1.22);
                         }
                       }}
                       className={`flex w-full items-center justify-between gap-2 rounded-xl px-2.5 py-1.5 text-left transition ${
@@ -903,9 +936,9 @@ function MapPage({
         </div>
       </div>
 
-      {/* Bottom-Center Quick 3D Camera Region Bar */}
+      {/* Bottom-Center Quick 3D Camera Region & Multi-Zoom Detail Bar */}
       {viewMode === "3d" && (
-        <div className="pointer-events-none absolute bottom-4 left-1/2 z-20 hidden -translate-x-1/2 xl:flex">
+        <div className="pointer-events-none absolute bottom-4 left-1/2 z-20 hidden -translate-x-1/2 items-center gap-2 lg:flex">
           <div className="hud-pill pointer-events-auto flex items-center gap-1 rounded-full p-1">
             {REGION_PRESETS.map((preset) => (
               <button
@@ -914,7 +947,7 @@ function MapPage({
                   if (preset.id === "fit") globeRef.current?.fitAll();
                   else if (preset.id === "server") globeRef.current?.focusServer();
                   else if (preset.lat != null && preset.lon != null) {
-                    globeRef.current?.focusLatLon(preset.lat, preset.lon, preset.dist ?? 2.4);
+                    globeRef.current?.focusLatLon(preset.lat, preset.lon, preset.dist ?? 1.85);
                   }
                 }}
                 className="rounded-full px-3 py-1 text-[11px] font-medium text-slate-300 transition hover:bg-cyan-500/20 hover:text-cyan-200"
@@ -922,6 +955,48 @@ function MapPage({
                 {preset.label}
               </button>
             ))}
+            <div className="mx-1 h-4 w-px bg-slate-700/70" />
+            <button
+              title="缩小视野"
+              onClick={() => globeRef.current?.zoomOut()}
+              className="grid h-6 w-6 place-items-center rounded-full text-slate-300 transition hover:bg-slate-800 hover:text-white"
+            >
+              <Minus className="h-3.5 w-3.5" />
+            </button>
+            <span className="mono-num px-1.5 text-[10px] font-medium text-cyan-300">
+              Z{zoomInfo.zoom} · {zoomInfo.scaleLabel}
+            </span>
+            <button
+              title="放大查看更细区块"
+              onClick={() => globeRef.current?.zoomIn()}
+              className="grid h-6 w-6 place-items-center rounded-full text-slate-300 transition hover:bg-cyan-500/20 hover:text-cyan-200"
+            >
+              <Plus className="h-3.5 w-3.5" />
+            </button>
+            <div className="mx-1 h-4 w-px bg-slate-700/70" />
+            <button
+              title="切换细分区块底图风格"
+              onClick={() =>
+                setDetailMapStyle((prev) =>
+                  prev === "zh" ? "satellite" : prev === "satellite" ? "dark" : prev === "dark" ? "off" : "zh",
+                )
+              }
+              className={`rounded-full px-2.5 py-1 text-[10px] font-medium transition ${
+                detailMapStyle === "satellite"
+                  ? "bg-amber-500/20 text-amber-200"
+                  : detailMapStyle === "zh" || detailMapStyle === "dark"
+                    ? "bg-emerald-500/18 text-emerald-200"
+                    : "text-slate-400 hover:text-slate-200"
+              }`}
+            >
+              {detailMapStyle === "zh"
+                ? "中文详图"
+                : detailMapStyle === "satellite"
+                  ? "卫星实景"
+                  : detailMapStyle === "dark"
+                    ? "暗黑全球"
+                    : "纯矢量"}
+            </button>
           </div>
         </div>
       )}
@@ -1101,7 +1176,7 @@ function MapPage({
                     <Button
                       size="sm"
                       variant="outline"
-                      onClick={() => globeRef.current?.focusLatLon(liveSelected.member.lat!, liveSelected.member.lon!, 2.1)}
+                      onClick={() => globeRef.current?.focusLatLon(liveSelected.member.lat!, liveSelected.member.lon!, 1.12)}
                       className="w-full border-slate-700 bg-slate-900/70 text-slate-200 hover:bg-slate-800"
                     >
                       <Crosshair className="mr-1.5 h-3.5 w-3.5 text-cyan-400" />

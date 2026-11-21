@@ -82,6 +82,7 @@ type Server struct {
 	postgres       bool
 	store          Store
 	geo            *geoDB
+	tiles          *tileCache
 	secret         string
 	panel          string
 	adminUser      string
@@ -119,6 +120,7 @@ func New(cfg Config) (*Server, error) {
 		postgres:       postgres,
 		store:          store,
 		geo:            newGeo(cfg.GeoIPFixture, cfg.GeoIPDB),
+		tiles:          newTileCache(),
 		secret:         cfg.AuthSecret,
 		panel:          cfg.PanelDist,
 		adminUser:      cfg.AdminUser,
@@ -165,6 +167,7 @@ func (s *Server) Handler() http.Handler {
 	engine.POST("/api/rooms/:name/kick", s.kick)
 	engine.GET("/api/map", s.worldMap)
 	engine.GET("/api/ws", s.panelWS)
+	engine.GET("/api/tiles/:layer/:z/:x/:y", s.proxyTile)
 	engine.GET("/api/login-logs", s.loginLogs)
 	engine.NoRoute(s.panelFile)
 	return engine

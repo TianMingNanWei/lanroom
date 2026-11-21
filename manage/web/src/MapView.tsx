@@ -11,12 +11,46 @@ import { alphaFromId } from "./iso";
 
 const darkLocalStyle: StyleSpecification = {
   version: 8,
-  sources: {},
+  sources: {
+    "esri-dark": {
+      type: "raster",
+      tiles: [`${location.origin}/api/tiles/dark/{z}/{x}/{y}`],
+      tileSize: 256,
+      maxzoom: 16,
+    },
+    "esri-places": {
+      type: "raster",
+      tiles: [`${location.origin}/api/tiles/places/{z}/{x}/{y}`],
+      tileSize: 256,
+      maxzoom: 16,
+    },
+  },
   layers: [
     {
       id: "background",
       type: "background",
-      paint: { "background-color": "#060d1c" },
+      paint: { "background-color": "#050b18" },
+    },
+    {
+      id: "esri-dark-tiles",
+      type: "raster",
+      source: "esri-dark",
+      minzoom: 2,
+      maxzoom: 18,
+      paint: {
+        "raster-opacity": ["interpolate", ["linear"], ["zoom"], 2, 0.35, 4, 0.92],
+        "raster-brightness-max": 0.9,
+      },
+    },
+    {
+      id: "esri-places-tiles",
+      type: "raster",
+      source: "esri-places",
+      minzoom: 3,
+      maxzoom: 18,
+      paint: {
+        "raster-opacity": ["interpolate", ["linear"], ["zoom"], 3, 0.5, 5, 0.92],
+      },
     },
   ],
 };
@@ -79,6 +113,7 @@ export function MapView({
       style: darkLocalStyle,
       center: [server?.lon ?? 108, server?.lat ?? 30],
       zoom: 2.2,
+      maxZoom: 17,
       attributionControl: false,
     });
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "bottom-right");
@@ -92,13 +127,20 @@ export function MapView({
         id: "country-fill",
         type: "fill",
         source: "countries",
-        paint: { "fill-color": "#10213d", "fill-opacity": 0.9 },
+        paint: {
+          "fill-color": "#0e2240",
+          "fill-opacity": ["interpolate", ["linear"], ["zoom"], 1.5, 0.55, 4, 0.14, 6.5, 0.0],
+        },
       });
       map.addLayer({
         id: "country-border",
         type: "line",
         source: "countries",
-        paint: { "line-color": "rgba(56, 189, 248, 0.25)", "line-width": 0.9 },
+        paint: {
+          "line-color": "rgba(56, 189, 248, 0.34)",
+          "line-width": 0.9,
+          "line-opacity": ["interpolate", ["linear"], ["zoom"], 2, 0.7, 7, 0.25],
+        },
       });
 
       map.addSource("links-control", { type: "geojson", data: { type: "FeatureCollection", features: [] } });

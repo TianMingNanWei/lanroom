@@ -6,6 +6,7 @@ import type { FeatureCollection, Geometry, Position } from "geojson";
 import type { GeometryCollection, Topology } from "topojson-specification";
 import world from "world-atlas/countries-50m.json";
 import type { MapCountry, MapLink, MapMember, ServerNode } from "./api";
+import { SphericalTileLayer, type DetailMapStyle, type ZoomTelemetry } from "./globeTiles";
 import { alphaFromId } from "./iso";
 
 const GLOBE_RADIUS = 1;
@@ -20,6 +21,8 @@ export type Globe3DHandle = {
   focusLatLon: (lat: number, lon: number, distance?: number) => void;
   focusServer: () => void;
   fitAll: () => void;
+  zoomIn: () => void;
+  zoomOut: () => void;
 };
 
 type Globe3DProps = {
@@ -30,8 +33,10 @@ type Globe3DProps = {
   isLoginMode: boolean;
   autoRotate: boolean;
   showControlLinks: boolean;
+  detailMapStyle?: DetailMapStyle;
   selectedId: string | null;
   recentJoinIds?: string[];
+  onZoomChange?: (info: ZoomTelemetry) => void;
   onSelect: (entity: SelectedEntity | null) => void;
 };
 
@@ -437,7 +442,7 @@ function spreadMembers(
       let lon = member.lon as number;
       if (total > 1 || sharesServer) {
         const angle = (idx / Math.max(total, 1)) * Math.PI * 2 + (sharesServer ? 0.55 : 0.25);
-        const radiusDeg = sharesServer ? 0.65 : Math.min(0.85, 0.35 + total * 0.1);
+        const radiusDeg = sharesServer ? 0.14 : Math.min(0.24, 0.08 + total * 0.03);
         lat = Math.max(-84, Math.min(84, lat + Math.sin(angle) * radiusDeg));
         lon = lon + Math.cos(angle) * radiusDeg;
       }
@@ -503,8 +508,10 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
     isLoginMode,
     autoRotate,
     showControlLinks,
+    detailMapStyle = "zh",
     selectedId,
     recentJoinIds = [],
+    onZoomChange,
     onSelect,
   },
   ref,
@@ -516,8 +523,12 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
 
   const onSelectRef = useRef(onSelect);
   onSelectRef.current = onSelect;
+  const onZoomChangeRef = useRef(onZoomChange);
+  onZoomChangeRef.current = onZoomChange;
   const autoRotateRef = useRef(autoRotate);
   autoRotateRef.current = autoRotate;
+  const detailMapStyleRef = useRef<DetailMapStyle>(detailMapStyle);
+  detailMapStyleRef.current = detailMapStyle;
   const serverRef = useRef(server);
   serverRef.current = server;
   const membersRef = useRef(members);
@@ -532,9 +543,11 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
     controls: OrbitControls;
     maxAnisotropy: number;
     earthMat: THREE.MeshPhongMaterial;
+    tileLayer: SphericalTileLayer;
     activeBorderGroup: THREE.Group;
     dynamicGroup: THREE.Group;
     scalableMarkers: THREE.Group[];
+    arcTubes: { mat: THREE.MeshBasicMaterial; baseOpacity: number }[];
     pickables: THREE.Object3D[];
     comets: AnimatedComet[];
     rings: AnimatedRing[];
@@ -548,24 +561,41 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
   const flyToLatLon = (lat: number, lon: number, distance = 2.35) => {
     const ctx = sceneCtxRef.current;
     if (!ctx) return;
+    const clampedDist = THREE.MathUtils.clamp(distance, 1.009, 4.5);
     const targetDir = latLonToVec3(lat, lon, 1).normalize();
-    const endPos = targetDir.multiplyScalar(distance);
+    const endPos = targetDir.multiplyScalar(clampedDist);
     ctx.flyTarget = {
       startPos: ctx.camera.position.clone(),
       endPos,
       startTime: performance.now(),
-      duration: 850,
+      duration: 820,
+    };
+  };
+
+  const smoothZoomFactor = (factor: number) => {
+    const ctx = sceneCtxRef.current;
+    if (!ctx) return;
+    const curPos = ctx.camera.position.clone();
+    const curDist = curPos.length();
+    const curAlt = Math.max(0.008, curDist - GLOBE_RADIUS);
+    const nextAlt = THREE.MathUtils.clamp(curAlt * factor, 0.009, 3.5);
+    const nextPos = curPos.normalize().multiplyScalar(GLOBE_RADIUS + nextAlt);
+    ctx.flyTarget = {
+      startPos: ctx.camera.position.clone(),
+      endPos: nextPos,
+      startTime: performance.now(),
+      duration: 420,
     };
   };
 
   useImperativeHandle(ref, () => ({
-    focusLatLon: (lat, lon, distance) => flyToLatLon(lat, lon, distance ?? 2.05),
+    focusLatLon: (lat, lon, distance) => flyToLatLon(lat, lon, distance ?? 1.48),
     focusServer: () => {
       const s = serverRef.current;
       if (s && s.lat != null && s.lon != null) {
-        flyToLatLon(s.lat, s.lon, 2.05);
+        flyToLatLon(s.lat, s.lon, 1.42);
       } else {
-        flyToLatLon(34, 108, 2.5);
+        flyToLatLon(34, 108, 2.2);
       }
     },
     fitAll: () => {
@@ -596,9 +626,11 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
         const v = latLonToVec3(la, lo, 1);
         maxAngle = Math.max(maxAngle, sumVec.angleTo(v));
       }
-      const dist = Math.min(3.55, Math.max(2.2, 2.05 + maxAngle * 1.15));
+      const dist = Math.min(3.55, Math.max(2.15, 2.0 + maxAngle * 1.15));
       flyToLatLon(lat, normLon, dist);
     },
+    zoomIn: () => smoothZoomFactor(0.52),
+    zoomOut: () => smoothZoomFactor(1.9),
   }));
 
   // 1. Initialize Three.js scene once
@@ -627,7 +659,7 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
     const camera = new THREE.PerspectiveCamera(
       40,
       Math.max(1, container.clientWidth) / Math.max(1, container.clientHeight),
-      0.04,
+      0.01,
       100,
     );
     camera.position.copy(latLonToVec3(26, 108, 2.55));
@@ -638,7 +670,7 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
     controls.dampingFactor = 0.065;
     controls.rotateSpeed = 0.52;
     controls.zoomSpeed = 0.85;
-    controls.minDistance = 1.15; // Allows sharp close-up regional inspection
+    controls.minDistance = 1.008; // Zoom all the way down to city districts & blocks (Z11)
     controls.maxDistance = 4.6;
     controls.autoRotate = autoRotateRef.current;
     controls.autoRotateSpeed = 0.25;
@@ -671,11 +703,17 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
     const earthMesh = new THREE.Mesh(earthGeo, earthMat);
     scene.add(earthMesh);
 
+    // Multi-zoom 3D spherical slippy-tile engine (streams detailed provinces/cities/districts on zoom!)
+    const tileLayer = new SphericalTileLayer(GLOBE_RADIUS, maxAnisotropy);
+    tileLayer.setStyle(detailMapStyleRef.current);
+    scene.add(tileLayer.group);
+
     // True 3D vector graticule & base 50m coastlines (razor-sharp at ANY magnification!)
     const graticule = createVectorGraticule();
     scene.add(graticule);
 
     const baseBorders = buildVectorBorders(null, GLOBE_RADIUS + 0.0018, "#5aa5f8", 0.48);
+    const baseBorderMat = baseBorders.material as THREE.LineBasicMaterial;
     scene.add(baseBorders);
 
     // Dynamic active-country glowing 3D vector border group
@@ -697,9 +735,11 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
       controls,
       maxAnisotropy,
       earthMat,
+      tileLayer,
       activeBorderGroup,
       dynamicGroup,
       scalableMarkers: [] as THREE.Group[],
+      arcTubes: [] as { mat: THREE.MeshBasicMaterial; baseOpacity: number }[],
       pickables: [] as THREE.Object3D[],
       comets: [] as AnimatedComet[],
       rings: [] as AnimatedRing[],
@@ -770,12 +810,12 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
       if (meta.kind === "server") {
         onSelectRef.current({ kind: "server", server: meta.server });
         if (meta.server.lat != null && meta.server.lon != null) {
-          flyToLatLon(meta.server.lat, meta.server.lon, 1.95);
+          flyToLatLon(meta.server.lat, meta.server.lon, 1.38);
         }
       } else if (meta.kind === "member") {
         onSelectRef.current({ kind: "member", member: meta.member });
         if (meta.member.lat != null && meta.member.lon != null) {
-          flyToLatLon(meta.member.lat, meta.member.lon, 1.85);
+          flyToLatLon(meta.member.lat, meta.member.lon, 1.24);
         }
       } else if (meta.kind === "link") {
         onSelectRef.current({ kind: "link", link: meta.link });
@@ -803,12 +843,15 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
     const labelWorldPos = new THREE.Vector3();
     const camDir = new THREE.Vector3();
     const labelNodes = new Map<string, HTMLDivElement>();
+    let lastReportedZoomKey = "";
 
     const animate = (now: number) => {
       rafId = requestAnimationFrame(animate);
       const t = now * 0.001;
 
-      controls.autoRotate = autoRotateRef.current && !ctx.isDragging && !ctx.flyTarget;
+      const camDistBefore = camera.position.length();
+      // Pause auto-rotation automatically when zoomed in to inspect fine regions
+      controls.autoRotate = autoRotateRef.current && !ctx.isDragging && !ctx.flyTarget && camDistBefore > 1.85;
 
       if (ctx.flyTarget) {
         const progress = Math.min(1, (now - ctx.flyTarget.startTime) / ctx.flyTarget.duration);
@@ -828,18 +871,40 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
         }
       }
 
-      // Zoom-adaptive rotate speed & LOD marker scaling (surgical crispness when zoomed in!)
+      // Dynamic near plane + zoom-adaptive LOD all the way down to city/district level (Z11)
       const camDist = camera.position.length();
-      const zoomFactor = THREE.MathUtils.clamp((camDist - 1.05) / 1.55, 0, 1);
-      controls.rotateSpeed = 0.14 + zoomFactor * 0.42;
-      const markerScale = 0.34 + zoomFactor * 0.72;
-      const cometScale = 0.44 + zoomFactor * 0.62;
+      const altitude = Math.max(0.008, camDist - GLOBE_RADIUS);
+      const desiredNear = Math.max(0.001, altitude * 0.14);
+      if (Math.abs(camera.near - desiredNear) / camera.near > 0.14) {
+        camera.near = desiredNear;
+        camera.updateProjectionMatrix();
+      }
+
+      controls.rotateSpeed = THREE.MathUtils.clamp(altitude * 0.36 + 0.012, 0.014, 0.56);
+      const markerScale = THREE.MathUtils.clamp(altitude * 0.62 + 0.035, 0.045, 1.08);
+      const cometScale = THREE.MathUtils.clamp(altitude * 0.6 + 0.08, 0.1, 1.05);
 
       for (const mGroup of ctx.scalableMarkers) {
         mGroup.scale.setScalar(markerScale);
       }
+      // Fade out wide glowing 3D tubes at close regional/city zoom so only crisp 1px filaments remain
+      const tubeZoomFade = THREE.MathUtils.clamp((altitude - 0.08) / 0.34, 0, 1);
+      for (const tube of ctx.arcTubes) {
+        tube.mat.opacity = tube.baseOpacity * tubeZoomFade;
+      }
 
       controls.update();
+
+      // Update multi-zoom 3D spherical slippy tiles & subtly dial back coarse outlines at deep zoom
+      const zoomInfo = tileLayer.update(camera, now);
+      const zoomKey = `${zoomInfo.zoom}:${zoomInfo.tilesActive}`;
+      if (zoomKey !== lastReportedZoomKey) {
+        lastReportedZoomKey = zoomKey;
+        onZoomChangeRef.current?.(zoomInfo);
+      }
+      const deepFade = zoomInfo.tilesActive ? THREE.MathUtils.clamp((altitude - 0.06) / 0.55, 0.18, 1) : 1;
+      baseBorderMat.opacity = 0.48 * deepFade;
+      graticule.visible = !zoomInfo.tilesActive || altitude > 0.25;
 
       if (ctx.serverCrystal) {
         ctx.serverCrystal.rotation.y = t * 1.3;
@@ -916,8 +981,13 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
           }
           labelWorldPos
             .copy(item.baseSurface)
-            .multiplyScalar(GLOBE_RADIUS + 0.004 + item.baseOffset * markerScale);
+            .multiplyScalar(GLOBE_RADIUS + 0.003 + item.baseOffset * markerScale);
           tempVec.copy(labelWorldPos).project(camera);
+          // Hide labels projected outside the viewport
+          if (tempVec.z > 1 || tempVec.x < -1.1 || tempVec.x > 1.1 || tempVec.y < -1.1 || tempVec.y > 1.1) {
+            el.style.opacity = "0";
+            continue;
+          }
           const x = (tempVec.x * 0.5 + 0.5) * width;
           const y = (-tempVec.y * 0.5 + 0.5) * height - (item.kind === "server" ? 12 : 8);
 
@@ -958,6 +1028,7 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
       renderer.domElement.removeEventListener("pointerdown", onPointerDown);
       renderer.domElement.removeEventListener("pointerup", onPointerUp);
       renderer.domElement.removeEventListener("pointerleave", onPointerLeave);
+      tileLayer.dispose();
       disposeGroup(dynamicGroup);
       disposeGroup(activeBorderGroup);
       disposeGroup(graticule);
@@ -980,6 +1051,10 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
       sceneSigRef.current = "";
     };
   }, []);
+
+  useEffect(() => {
+    sceneCtxRef.current?.tileLayer.setStyle(detailMapStyle);
+  }, [detailMapStyle]);
 
   // 2. Refresh 4096px Earth fill texture + luminous 3D vector borders ONLY when active countries change
   useEffect(() => {
@@ -1025,6 +1100,7 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
 
     disposeGroup(ctx.dynamicGroup);
     ctx.scalableMarkers = [];
+    ctx.arcTubes = [];
     ctx.pickables = [];
     ctx.comets = [];
     ctx.rings = [];
@@ -1302,19 +1378,19 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
           line.computeLineDistances();
           ctx.dynamicGroup.add(line);
         } else {
-          // Fine glowing 3D tube (clean & sharp even on close zoom)
-          const tubeRadius = isSelected ? 0.0044 : 0.0022;
-          const tube = new THREE.Mesh(
-            new THREE.TubeGeometry(curve, 72, tubeRadius, 8, false),
-            new THREE.MeshBasicMaterial({
-              color: arcColor,
-              transparent: true,
-              opacity: isSelected ? 0.92 : 0.54,
-              blending: THREE.AdditiveBlending,
-              depthWrite: false,
-            }),
-          );
+          // Fine glowing 3D tube (fades cleanly at city zoom so thin 1px coreLine stays razor-sharp)
+          const tubeRadius = isSelected ? 0.004 : 0.002;
+          const tubeBaseOpacity = isSelected ? 0.88 : 0.48;
+          const tubeMat = new THREE.MeshBasicMaterial({
+            color: arcColor,
+            transparent: true,
+            opacity: tubeBaseOpacity,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+          });
+          const tube = new THREE.Mesh(new THREE.TubeGeometry(curve, 72, tubeRadius, 8, false), tubeMat);
           ctx.dynamicGroup.add(tube);
+          ctx.arcTubes.push({ mat: tubeMat, baseOpacity: tubeBaseOpacity });
 
           // Razor-sharp inner filament
           const pts = curve.getPoints(72);
