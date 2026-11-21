@@ -4,7 +4,7 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { feature } from "topojson-client";
 import type { FeatureCollection, Geometry, Position } from "geojson";
 import type { GeometryCollection, Topology } from "topojson-specification";
-import world from "world-atlas/countries-110m.json";
+import world from "world-atlas/countries-50m.json";
 import type { MapCountry, MapLink, MapMember, ServerNode } from "./api";
 import { alphaFromId } from "./iso";
 
@@ -72,7 +72,8 @@ type TrackedLabel = {
   text: string;
   kind: "server" | "node";
   color: string;
-  position: THREE.Vector3;
+  baseSurface: THREE.Vector3;
+  baseOffset: number;
   priority: number;
 };
 
@@ -86,21 +87,6 @@ const worldFeatures = (() => {
   return feature(topo, topo.objects.countries) as unknown as FeatureCollection<Geometry, { name: string }>;
 })();
 
-let cachedDotPattern: HTMLCanvasElement | null = null;
-function getLandDotPattern(): HTMLCanvasElement {
-  if (cachedDotPattern) return cachedDotPattern;
-  const tile = document.createElement("canvas");
-  tile.width = 10;
-  tile.height = 10;
-  const tctx = tile.getContext("2d")!;
-  tctx.fillStyle = "rgba(125, 211, 252, 0.2)";
-  tctx.beginPath();
-  tctx.arc(5, 5, 1.05, 0, Math.PI * 2);
-  tctx.fill();
-  cachedDotPattern = tile;
-  return tile;
-}
-
 function latLonToVec3(lat: number, lon: number, radius: number): THREE.Vector3 {
   const phi = (90 - lat) * DEG2RAD;
   const theta = (lon + 180) * DEG2RAD;
@@ -111,55 +97,143 @@ function latLonToVec3(lat: number, lon: number, radius: number): THREE.Vector3 {
   );
 }
 
-function buildEarthTexture(countries: MapCountry[]): THREE.CanvasTexture {
-  const width = 2048;
-  const height = 1024;
+/**
+ * Append subdivided 3D great-circle segments along a GeoJSON ring so vector borders
+ * hug the curved sphere surface tightly with zero clipping and infinite zoom sharpness.
+ */
+function appendRingSegments(ring: Position[], radius: number, out: number[]) {
+  if (ring.length < 2) return;
+  for (let i = 0; i < ring.length - 1; i++) {
+    const [lon1, lat1] = ring[i];
+    const [lon2, lat2] = ring[i + 1];
+    const dLon = lon2 - lon1;
+    // Skip anti-meridian wrap jump
+    if (Math.abs(dLon) > 180) continue;
+    const dLat = lat2 - lat1;
+    const distDeg = Math.hypot(dLon, dLat);
+    const steps = Math.max(1, Math.ceil(distDeg / 2.2));
+    let prev = latLonToVec3(lat1, lon1, radius);
+    for (let s = 1; s <= steps; s++) {
+      const f = s / steps;
+      const cur = latLonToVec3(lat1 + dLat * f, lon1 + dLon * f, radius);
+      out.push(prev.x, prev.y, prev.z, cur.x, cur.y, cur.z);
+      prev = cur;
+    }
+  }
+}
+
+/**
+ * Build crisp 3D vector coastlines & country borders directly on the sphere (never blurs at any zoom).
+ */
+function buildVectorBorders(activeCodes: Set<string> | null, radius: number, color: string, opacity: number): THREE.LineSegments {
+  const verts: number[] = [];
+  for (const feat of worldFeatures.features) {
+    if (activeCodes) {
+      const code = alphaFromId(String(feat.id ?? ""));
+      if (!activeCodes.has(code)) continue;
+    }
+    const geom = feat.geometry;
+    if (!geom) continue;
+    if (geom.type === "Polygon") {
+      geom.coordinates.forEach((ring) => appendRingSegments(ring, radius, verts));
+    } else if (geom.type === "MultiPolygon") {
+      geom.coordinates.forEach((poly) => poly.forEach((ring) => appendRingSegments(ring, radius, verts)));
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(verts, 3));
+  const mat = new THREE.LineBasicMaterial({
+    color,
+    transparent: true,
+    opacity,
+    depthWrite: false,
+  });
+  return new THREE.LineSegments(geo, mat);
+}
+
+/**
+ * Build crisp 3D vector lat/lon graticule grid + highlighted equator directly on the sphere.
+ */
+function createVectorGraticule(): THREE.Group {
+  const group = new THREE.Group();
+  const r = GLOBE_RADIUS + 0.0009;
+  const gridVerts: number[] = [];
+  const eqVerts: number[] = [];
+
+  // Meridians every 15°
+  for (let lon = -180; lon < 180; lon += 15) {
+    for (let lat = -80; lat < 80; lat += 4) {
+      const a = latLonToVec3(lat, lon, r);
+      const b = latLonToVec3(lat + 4, lon, r);
+      gridVerts.push(a.x, a.y, a.z, b.x, b.y, b.z);
+    }
+  }
+  // Parallels every 15°
+  for (let lat = -75; lat <= 75; lat += 15) {
+    const target = lat === 0 ? eqVerts : gridVerts;
+    for (let lon = -180; lon < 180; lon += 3) {
+      const a = latLonToVec3(lat, lon, r);
+      const b = latLonToVec3(lat, lon + 3, r);
+      target.push(a.x, a.y, a.z, b.x, b.y, b.z);
+    }
+  }
+
+  const gridGeo = new THREE.BufferGeometry();
+  gridGeo.setAttribute("position", new THREE.Float32BufferAttribute(gridVerts, 3));
+  group.add(
+    new THREE.LineSegments(
+      gridGeo,
+      new THREE.LineBasicMaterial({
+        color: "#38bdf8",
+        transparent: true,
+        opacity: 0.08,
+        depthWrite: false,
+      }),
+    ),
+  );
+
+  const eqGeo = new THREE.BufferGeometry();
+  eqGeo.setAttribute("position", new THREE.Float32BufferAttribute(eqVerts, 3));
+  group.add(
+    new THREE.LineSegments(
+      eqGeo,
+      new THREE.LineBasicMaterial({
+        color: "#38bdf8",
+        transparent: true,
+        opacity: 0.2,
+        depthWrite: false,
+      }),
+    ),
+  );
+
+  return group;
+}
+
+/**
+ * High-resolution 4096x2048 base surface texture for smooth ocean & land fills.
+ * All coastlines, borders, and graticule lines are rendered as true 3D vectors above this sphere
+ * so zooming in stays mathematically sharp with zero bitmap pixelation.
+ */
+function buildEarthTexture(countries: MapCountry[], maxAnisotropy: number): THREE.CanvasTexture {
+  const width = 4096;
+  const height = 2048;
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext("2d")!;
 
-  // Deep obsidian-space ocean so continents and glowing telemetry pop cleanly
+  // Deep obsidian-space ocean gradient
   const ocean = ctx.createLinearGradient(0, 0, 0, height);
   ocean.addColorStop(0, "#020612");
-  ocean.addColorStop(0.22, "#040d1f");
-  ocean.addColorStop(0.5, "#06142c");
-  ocean.addColorStop(0.78, "#040d1f");
+  ocean.addColorStop(0.24, "#040d20");
+  ocean.addColorStop(0.5, "#06152f");
+  ocean.addColorStop(0.76, "#040d20");
   ocean.addColorStop(1, "#020612");
   ctx.fillStyle = ocean;
   ctx.fillRect(0, 0, width, height);
 
-  // Subtle precision tactical graticule
-  ctx.strokeStyle = "rgba(56, 189, 248, 0.055)";
-  ctx.lineWidth = 1;
-  for (let lon = -180; lon <= 180; lon += 15) {
-    const x = ((lon + 180) / 360) * width;
-    ctx.beginPath();
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, height);
-    ctx.stroke();
-  }
-  for (let lat = -75; lat <= 75; lat += 15) {
-    const y = ((90 - lat) / 180) * height;
-    ctx.beginPath();
-    ctx.moveTo(0, y);
-    ctx.lineTo(width, y);
-    ctx.stroke();
-  }
-
-  // Highlighted dashed equator line
-  ctx.save();
-  ctx.strokeStyle = "rgba(56, 189, 248, 0.14)";
-  ctx.setLineDash([6, 8]);
-  ctx.beginPath();
-  ctx.moveTo(0, height / 2);
-  ctx.lineTo(width, height / 2);
-  ctx.stroke();
-  ctx.restore();
-
   const countMap = new Map(countries.map((c) => [c.country, c.count]));
   const maxCount = Math.max(1, ...countries.map((c) => c.count));
-  const dotPattern = ctx.createPattern(getLandDotPattern(), "repeat");
 
   const project = ([lon, lat]: Position): [number, number] => [
     ((lon + 180) / 360) * width,
@@ -198,44 +272,26 @@ function buildEarthTexture(countries: MapCountry[]): THREE.CanvasTexture {
 
     if (active > 0) {
       const ratio = active / maxCount;
-      ctx.save();
-      ctx.fillStyle = `rgba(14, 165, 233, ${0.26 + ratio * 0.34})`;
+      ctx.fillStyle = `rgba(14, 165, 233, ${0.24 + ratio * 0.3})`;
       ctx.fill();
-      if (dotPattern) {
-        ctx.fillStyle = dotPattern;
-        ctx.fill();
-      }
-      ctx.shadowColor = "rgba(56, 189, 248, 0.85)";
-      ctx.shadowBlur = 10;
-      ctx.strokeStyle = `rgba(125, 211, 252, ${0.75 + ratio * 0.25})`;
-      ctx.lineWidth = 1.9;
-      ctx.stroke();
-      ctx.restore();
     } else {
-      ctx.fillStyle = "#0e2240";
+      ctx.fillStyle = "#0f2342";
       ctx.fill();
-      if (dotPattern) {
-        ctx.save();
-        ctx.globalAlpha = 0.36;
-        ctx.fillStyle = dotPattern;
-        ctx.fill();
-        ctx.restore();
-      }
-      ctx.strokeStyle = "rgba(96, 165, 250, 0.36)";
-      ctx.lineWidth = 1.05;
-      ctx.stroke();
     }
   }
 
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
-  texture.anisotropy = 8;
+  texture.anisotropy = Math.max(4, maxAnisotropy);
+  texture.minFilter = THREE.LinearMipmapLinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  texture.generateMipmaps = true;
   texture.needsUpdate = true;
   return texture;
 }
 
 function createOuterAtmosphere(): THREE.Mesh {
-  const geo = new THREE.SphereGeometry(GLOBE_RADIUS * 1.14, 64, 64);
+  const geo = new THREE.SphereGeometry(GLOBE_RADIUS * 1.14, 72, 72);
   const mat = new THREE.ShaderMaterial({
     vertexShader: `
       varying vec3 vNormal;
@@ -249,7 +305,7 @@ function createOuterAtmosphere(): THREE.Mesh {
       void main() {
         float intensity = pow(0.66 - dot(vNormal, vec3(0.0, 0.0, 1.0)), 3.4);
         vec3 glow = mix(vec3(0.11, 0.45, 0.96), vec3(0.22, 0.84, 0.99), clamp(intensity * 1.5, 0.0, 1.0));
-        gl_FragColor = vec4(glow, clamp(intensity * 0.95, 0.0, 0.8));
+        gl_FragColor = vec4(glow, clamp(intensity * 0.95, 0.0, 0.78));
       }
     `,
     blending: THREE.AdditiveBlending,
@@ -261,7 +317,7 @@ function createOuterAtmosphere(): THREE.Mesh {
 }
 
 function createInnerLimbRim(): THREE.Mesh {
-  const geo = new THREE.SphereGeometry(GLOBE_RADIUS * 1.003, 64, 64);
+  const geo = new THREE.SphereGeometry(GLOBE_RADIUS * 1.0035, 96, 72);
   const mat = new THREE.ShaderMaterial({
     vertexShader: `
       varying vec3 vNormal;
@@ -277,9 +333,9 @@ function createInnerLimbRim(): THREE.Mesh {
       varying vec3 vNormal;
       varying vec3 vViewDir;
       void main() {
-        float fresnel = pow(1.0 - max(0.0, dot(vNormal, vViewDir)), 3.6);
+        float fresnel = pow(1.0 - max(0.0, dot(vNormal, vViewDir)), 3.8);
         vec3 rim = mix(vec3(0.12, 0.68, 0.98), vec3(0.55, 0.36, 0.96), 0.25);
-        gl_FragColor = vec4(rim, fresnel * 0.55);
+        gl_FragColor = vec4(rim, fresnel * 0.5);
       }
     `,
     blending: THREE.AdditiveBlending,
@@ -294,7 +350,7 @@ function createOrbitalRings(): THREE.Group {
 
   const makeRing = (radius: number, color: string, opacity: number, rotX: number, rotZ: number) => {
     const pts: THREE.Vector3[] = [];
-    const segs = 128;
+    const segs = 160;
     for (let i = 0; i <= segs; i++) {
       const a = (i / segs) * Math.PI * 2;
       pts.push(new THREE.Vector3(Math.cos(a) * radius, 0, Math.sin(a) * radius));
@@ -315,8 +371,8 @@ function createOrbitalRings(): THREE.Group {
     return line;
   };
 
-  group.add(makeRing(GLOBE_RADIUS * 1.24, "#38bdf8", 0.16, 0.42, 0.18));
-  group.add(makeRing(GLOBE_RADIUS * 1.36, "#8b5cf6", 0.11, -0.52, -0.26));
+  group.add(makeRing(GLOBE_RADIUS * 1.24, "#38bdf8", 0.15, 0.42, 0.18));
+  group.add(makeRing(GLOBE_RADIUS * 1.36, "#8b5cf6", 0.1, -0.52, -0.26));
   return group;
 }
 
@@ -345,10 +401,10 @@ function createStarfield(): THREE.Points {
   geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
   geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
   const mat = new THREE.PointsMaterial({
-    size: 0.048,
+    size: 0.044,
     vertexColors: true,
     transparent: true,
-    opacity: 0.62,
+    opacity: 0.58,
     depthWrite: false,
   });
   return new THREE.Points(geo, mat);
@@ -381,7 +437,7 @@ function spreadMembers(
       let lon = member.lon as number;
       if (total > 1 || sharesServer) {
         const angle = (idx / Math.max(total, 1)) * Math.PI * 2 + (sharesServer ? 0.55 : 0.25);
-        const radiusDeg = sharesServer ? 1.25 : Math.min(1.25, 0.52 + total * 0.12);
+        const radiusDeg = sharesServer ? 0.65 : Math.min(0.85, 0.35 + total * 0.1);
         lat = Math.max(-84, Math.min(84, lat + Math.sin(angle) * radiusDeg));
         lon = lon + Math.cos(angle) * radiusDeg;
       }
@@ -474,8 +530,11 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
     scene: THREE.Scene;
     camera: THREE.PerspectiveCamera;
     controls: OrbitControls;
+    maxAnisotropy: number;
     earthMat: THREE.MeshPhongMaterial;
+    activeBorderGroup: THREE.Group;
     dynamicGroup: THREE.Group;
+    scalableMarkers: THREE.Group[];
     pickables: THREE.Object3D[];
     comets: AnimatedComet[];
     rings: AnimatedRing[];
@@ -486,7 +545,7 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
     isDragging: boolean;
   } | null>(null);
 
-  const flyToLatLon = (lat: number, lon: number, distance = 2.45) => {
+  const flyToLatLon = (lat: number, lon: number, distance = 2.35) => {
     const ctx = sceneCtxRef.current;
     if (!ctx) return;
     const targetDir = latLonToVec3(lat, lon, 1).normalize();
@@ -500,13 +559,13 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
   };
 
   useImperativeHandle(ref, () => ({
-    focusLatLon: (lat, lon, distance) => flyToLatLon(lat, lon, distance ?? 2.35),
+    focusLatLon: (lat, lon, distance) => flyToLatLon(lat, lon, distance ?? 2.05),
     focusServer: () => {
       const s = serverRef.current;
       if (s && s.lat != null && s.lon != null) {
-        flyToLatLon(s.lat, s.lon, 2.32);
+        flyToLatLon(s.lat, s.lon, 2.05);
       } else {
-        flyToLatLon(34, 108, 2.7);
+        flyToLatLon(34, 108, 2.5);
       }
     },
     fitAll: () => {
@@ -517,7 +576,7 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
         if (m.lat != null && m.lon != null) pts.push([m.lat, m.lon]);
       }
       if (pts.length === 0) {
-        flyToLatLon(26, 108, 2.85);
+        flyToLatLon(26, 108, 2.75);
         return;
       }
       const sumVec = new THREE.Vector3();
@@ -525,7 +584,7 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
         sumVec.add(latLonToVec3(la, lo, 1));
       }
       if (sumVec.lengthSq() < 0.001) {
-        flyToLatLon(pts[0][0], pts[0][1], 3.1);
+        flyToLatLon(pts[0][0], pts[0][1], 3.0);
         return;
       }
       sumVec.normalize();
@@ -537,7 +596,7 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
         const v = latLonToVec3(la, lo, 1);
         maxAngle = Math.max(maxAngle, sumVec.angleTo(v));
       }
-      const dist = Math.min(3.55, Math.max(2.35, 2.15 + maxAngle * 1.15));
+      const dist = Math.min(3.55, Math.max(2.2, 2.05 + maxAngle * 1.15));
       flyToLatLon(lat, normLon, dist);
     },
   }));
@@ -555,7 +614,8 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
       return;
     }
 
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    const maxAnisotropy = renderer.capabilities.getMaxAnisotropy();
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2.5));
     renderer.setSize(container.clientWidth, container.clientHeight);
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.12;
@@ -567,29 +627,28 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
     const camera = new THREE.PerspectiveCamera(
       40,
       Math.max(1, container.clientWidth) / Math.max(1, container.clientHeight),
-      0.1,
+      0.04,
       100,
     );
-    camera.position.copy(latLonToVec3(26, 108, 2.62));
+    camera.position.copy(latLonToVec3(26, 108, 2.55));
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enablePan = false;
     controls.enableDamping = true;
     controls.dampingFactor = 0.065;
-    controls.rotateSpeed = 0.55;
+    controls.rotateSpeed = 0.52;
     controls.zoomSpeed = 0.85;
-    controls.minDistance = 1.42;
+    controls.minDistance = 1.15; // Allows sharp close-up regional inspection
     controls.maxDistance = 4.6;
     controls.autoRotate = autoRotateRef.current;
-    controls.autoRotateSpeed = 0.28;
+    controls.autoRotateSpeed = 0.25;
 
-    // Balanced space telemetry lighting
-    const ambient = new THREE.AmbientLight("#b9d6f8", 1.35);
+    const ambient = new THREE.AmbientLight("#b9d6f8", 1.38);
     scene.add(ambient);
-    const keyLight = new THREE.DirectionalLight("#e0f2fe", 1.45);
+    const keyLight = new THREE.DirectionalLight("#e0f2fe", 1.42);
     keyLight.position.set(5, 3, 5);
     scene.add(keyLight);
-    const rimLight = new THREE.DirectionalLight("#7c3aed", 0.6);
+    const rimLight = new THREE.DirectionalLight("#7c3aed", 0.58);
     rimLight.position.set(-5, -2, -4);
     scene.add(rimLight);
 
@@ -599,18 +658,29 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
     const orbitalRings = createOrbitalRings();
     scene.add(orbitalRings);
 
-    // Earth sphere
-    const earthGeo = new THREE.SphereGeometry(GLOBE_RADIUS, 72, 72);
-    const earthTexture = buildEarthTexture([]);
+    // High-segment Earth sphere (128x96) so horizon stays ultra-smooth even when zoomed in
+    const earthGeo = new THREE.SphereGeometry(GLOBE_RADIUS, 128, 96);
+    const earthTexture = buildEarthTexture([], maxAnisotropy);
     const earthMat = new THREE.MeshPhongMaterial({
       map: earthTexture,
-      specular: new THREE.Color("#0c2754"),
-      shininess: 18,
+      specular: new THREE.Color("#0b244e"),
+      shininess: 16,
       emissive: new THREE.Color("#040b18"),
       emissiveIntensity: 0.45,
     });
     const earthMesh = new THREE.Mesh(earthGeo, earthMat);
     scene.add(earthMesh);
+
+    // True 3D vector graticule & base 50m coastlines (razor-sharp at ANY magnification!)
+    const graticule = createVectorGraticule();
+    scene.add(graticule);
+
+    const baseBorders = buildVectorBorders(null, GLOBE_RADIUS + 0.0018, "#5aa5f8", 0.48);
+    scene.add(baseBorders);
+
+    // Dynamic active-country glowing 3D vector border group
+    const activeBorderGroup = new THREE.Group();
+    scene.add(activeBorderGroup);
 
     const innerRim = createInnerLimbRim();
     scene.add(innerRim);
@@ -625,8 +695,11 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
       scene,
       camera,
       controls,
+      maxAnisotropy,
       earthMat,
+      activeBorderGroup,
       dynamicGroup,
+      scalableMarkers: [] as THREE.Group[],
       pickables: [] as THREE.Object3D[],
       comets: [] as AnimatedComet[],
       rings: [] as AnimatedRing[],
@@ -697,12 +770,12 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
       if (meta.kind === "server") {
         onSelectRef.current({ kind: "server", server: meta.server });
         if (meta.server.lat != null && meta.server.lon != null) {
-          flyToLatLon(meta.server.lat, meta.server.lon, 2.25);
+          flyToLatLon(meta.server.lat, meta.server.lon, 1.95);
         }
       } else if (meta.kind === "member") {
         onSelectRef.current({ kind: "member", member: meta.member });
         if (meta.member.lat != null && meta.member.lon != null) {
-          flyToLatLon(meta.member.lat, meta.member.lon, 2.25);
+          flyToLatLon(meta.member.lat, meta.member.lon, 1.85);
         }
       } else if (meta.kind === "link") {
         onSelectRef.current({ kind: "link", link: meta.link });
@@ -727,6 +800,7 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
 
     let rafId = 0;
     const tempVec = new THREE.Vector3();
+    const labelWorldPos = new THREE.Vector3();
     const camDir = new THREE.Vector3();
     const labelNodes = new Map<string, HTMLDivElement>();
 
@@ -754,6 +828,17 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
         }
       }
 
+      // Zoom-adaptive rotate speed & LOD marker scaling (surgical crispness when zoomed in!)
+      const camDist = camera.position.length();
+      const zoomFactor = THREE.MathUtils.clamp((camDist - 1.05) / 1.55, 0, 1);
+      controls.rotateSpeed = 0.14 + zoomFactor * 0.42;
+      const markerScale = 0.34 + zoomFactor * 0.72;
+      const cometScale = 0.44 + zoomFactor * 0.62;
+
+      for (const mGroup of ctx.scalableMarkers) {
+        mGroup.scale.setScalar(markerScale);
+      }
+
       controls.update();
 
       if (ctx.serverCrystal) {
@@ -772,14 +857,13 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
         mat.opacity = (1 - cycle) * (1 - cycle) * ring.baseOpacity;
       }
 
-      // Smooth tapered comet streaks flying along 3D arcs
       for (const comet of ctx.comets) {
         const raw = (t * comet.speed + comet.offset) % 1;
         const headU = comet.reverse ? 1 - raw : raw;
         const dir = comet.reverse ? 1 : -1;
         const segCount = comet.segments.length;
         for (let i = 0; i < segCount; i++) {
-          const segU = headU + dir * i * 0.022;
+          const segU = headU + dir * i * 0.02;
           const segMesh = comet.segments[i];
           if (segU < 0.01 || segU > 0.99) {
             segMesh.visible = false;
@@ -789,7 +873,7 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
           comet.curve.getPoint(segU, segMesh.position);
           const edgeFade = Math.sin(segU * Math.PI);
           const decay = 1 - i / segCount;
-          segMesh.scale.setScalar((0.55 + edgeFade * 0.55) * decay);
+          segMesh.scale.setScalar((0.55 + edgeFade * 0.55) * decay * cometScale);
         }
       }
 
@@ -798,7 +882,7 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
 
       renderer.render(scene, camera);
 
-      // Projected 2D HTML labels with screen-space collision avoidance
+      // Projected 2D HTML labels synced with zoom-adaptive marker height & collision avoidance
       const labelRoot = labelLayerRef.current;
       if (labelRoot) {
         const width = container.clientWidth;
@@ -825,16 +909,18 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
             labelNodes.set(item.id, el);
           }
 
-          const dot = item.position.clone().normalize().dot(camDir);
-          if (dot < 0.1) {
+          const dot = item.baseSurface.dot(camDir);
+          if (dot < 0.12) {
             el.style.opacity = "0";
             continue;
           }
-          tempVec.copy(item.position).project(camera);
+          labelWorldPos
+            .copy(item.baseSurface)
+            .multiplyScalar(GLOBE_RADIUS + 0.004 + item.baseOffset * markerScale);
+          tempVec.copy(labelWorldPos).project(camera);
           const x = (tempVec.x * 0.5 + 0.5) * width;
-          const y = (-tempVec.y * 0.5 + 0.5) * height - (item.kind === "server" ? 14 : 10);
+          const y = (-tempVec.y * 0.5 + 0.5) * height - (item.kind === "server" ? 12 : 8);
 
-          // Approximate pill bounding box for clean collision culling
           const estW = Math.min(200, Math.max(88, item.text.length * 7.2 + 28));
           const estH = 24;
           const box = { x1: x - estW / 2 - 4, y1: y - estH - 4, x2: x + estW / 2 + 4, y2: y + 4 };
@@ -847,7 +933,7 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
             continue;
           }
           placedBoxes.push(box);
-          el.style.opacity = String(Math.min(1, (dot - 0.1) * 3.4));
+          el.style.opacity = String(Math.min(1, (dot - 0.12) * 3.6));
           el.style.transform = `translate3d(${x.toFixed(1)}px, ${y.toFixed(1)}px, 0) translate(-50%, -100%)`;
         }
 
@@ -873,7 +959,11 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
       renderer.domElement.removeEventListener("pointerup", onPointerUp);
       renderer.domElement.removeEventListener("pointerleave", onPointerLeave);
       disposeGroup(dynamicGroup);
+      disposeGroup(activeBorderGroup);
+      disposeGroup(graticule);
       disposeGroup(orbitalRings);
+      (baseBorders.geometry as THREE.BufferGeometry).dispose();
+      (baseBorders.material as THREE.Material).dispose();
       earthGeo.dispose();
       earthMat.map?.dispose();
       earthMat.dispose();
@@ -891,7 +981,7 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
     };
   }, []);
 
-  // 2. Refresh Earth texture ONLY when active country counts actually change
+  // 2. Refresh 4096px Earth fill texture + luminous 3D vector borders ONLY when active countries change
   useEffect(() => {
     const ctx = sceneCtxRef.current;
     if (!ctx) return;
@@ -902,11 +992,18 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
     if (sig === countriesSigRef.current) return;
     countriesSigRef.current = sig;
 
-    const nextTex = buildEarthTexture(countries);
+    const nextTex = buildEarthTexture(countries, ctx.maxAnisotropy);
     const prevTex = ctx.earthMat.map;
     ctx.earthMat.map = nextTex;
     ctx.earthMat.needsUpdate = true;
     prevTex?.dispose();
+
+    disposeGroup(ctx.activeBorderGroup);
+    if (countries.length > 0) {
+      const activeSet = new Set(countries.map((c) => c.country));
+      const activeBorders = buildVectorBorders(activeSet, GLOBE_RADIUS + 0.0025, "#7dd3fc", 0.95);
+      ctx.activeBorderGroup.add(activeBorders);
+    }
   }, [countries]);
 
   // 3. Rebuild 3D markers & 3D communication arcs ONLY when topology actually changes (zero flicker)
@@ -927,6 +1024,7 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
     sceneSigRef.current = sig;
 
     disposeGroup(ctx.dynamicGroup);
+    ctx.scalableMarkers = [];
     ctx.pickables = [];
     ctx.comets = [];
     ctx.rings = [];
@@ -939,22 +1037,21 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
 
     // A. Render Server 3D Spire
     if (server && server.lat != null && server.lon != null) {
-      const basePos = latLonToVec3(server.lat, server.lon, GLOBE_RADIUS + 0.004);
+      const surfaceUnit = latLonToVec3(server.lat, server.lon, 1);
+      const basePos = surfaceUnit.clone().multiplyScalar(GLOBE_RADIUS + 0.003);
       const serverGroup = new THREE.Group();
       orientToSurface(serverGroup, basePos);
 
-      // Layered hexagonal base disc
       const baseHex = new THREE.Mesh(
-        new THREE.CircleGeometry(0.025, 6),
+        new THREE.CircleGeometry(0.024, 6),
         new THREE.MeshBasicMaterial({ color: "#a855f7", transparent: true, opacity: 0.92, side: THREE.DoubleSide }),
       );
       baseHex.rotation.x = -Math.PI / 2;
       serverGroup.add(baseHex);
 
-      // Luminous vertical energy spire
-      const spireHeight = 0.135;
+      const spireHeight = 0.13;
       const spire = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.0022, 0.0095, spireHeight, 12),
+        new THREE.CylinderGeometry(0.002, 0.0085, spireHeight, 12),
         new THREE.MeshBasicMaterial({
           color: "#8b5cf6",
           transparent: true,
@@ -966,18 +1063,16 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
       spire.position.y = spireHeight / 2;
       serverGroup.add(spire);
 
-      // Floating rotating octahedron crystal
       const crystal = new THREE.Mesh(
-        new THREE.OctahedronGeometry(0.021, 0),
+        new THREE.OctahedronGeometry(0.02, 0),
         new THREE.MeshBasicMaterial({ color: "#f3e8ff" }),
       );
       crystal.position.y = spireHeight + 0.02;
       serverGroup.add(crystal);
       ctx.serverCrystal = crystal;
 
-      // Tilted orbiting halo ring around server crystal
       const orbitRing = new THREE.Mesh(
-        new THREE.TorusGeometry(0.036, 0.0022, 8, 36),
+        new THREE.TorusGeometry(0.034, 0.002, 8, 36),
         new THREE.MeshBasicMaterial({
           color: "#c084fc",
           transparent: true,
@@ -991,10 +1086,9 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
       serverGroup.add(orbitRing);
       ctx.serverOrbit = orbitRing;
 
-      // Double expanding radar rings
       for (let i = 0; i < 2; i++) {
         const ring = new THREE.Mesh(
-          new THREE.RingGeometry(0.02, 0.028, 40),
+          new THREE.RingGeometry(0.02, 0.027, 40),
           new THREE.MeshBasicMaterial({
             color: "#c084fc",
             transparent: true,
@@ -1007,7 +1101,7 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
         ring.rotation.x = -Math.PI / 2;
         ring.position.y = 0.002;
         serverGroup.add(ring);
-        ctx.rings.push({ mesh: ring, phase: i * 0.5, speed: 0.42, maxScale: 3.3, baseOpacity: 0.82 });
+        ctx.rings.push({ mesh: ring, phase: i * 0.5, speed: 0.42, maxScale: 3.2, baseOpacity: 0.82 });
       }
 
       const hitMesh = new THREE.Mesh(
@@ -1027,14 +1121,15 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
       ctx.pickables.push(hitMesh);
 
       ctx.dynamicGroup.add(serverGroup);
+      ctx.scalableMarkers.push(serverGroup);
 
-      const labelPos = latLonToVec3(server.lat, server.lon, GLOBE_RADIUS + spireHeight + 0.055);
       ctx.labels.push({
         id: "server-label",
         text: `${server.name || "SERVER"}${server.city ? ` · ${server.city}` : ""}`,
         kind: "server",
         color: "#c084fc",
-        position: labelPos,
+        baseSurface: surfaceUnit,
+        baseOffset: spireHeight + 0.048,
         priority: 100,
       });
     }
@@ -1044,15 +1139,15 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
       const color = modeColor(member, isLoginMode);
       const isSelected = selectedId === id;
       const isFreshJoin = recentSet.has(id);
-      const basePos = latLonToVec3(lat, lon, GLOBE_RADIUS + 0.004);
+      const surfaceUnit = latLonToVec3(lat, lon, 1);
+      const basePos = surfaceUnit.clone().multiplyScalar(GLOBE_RADIUS + 0.003);
       const nodeGroup = new THREE.Group();
       orientToSurface(nodeGroup, basePos);
 
-      const pinHeight = isSelected ? 0.072 : isFreshJoin ? 0.064 : 0.044;
+      const pinHeight = isSelected ? 0.068 : isFreshJoin ? 0.06 : 0.042;
 
-      // Glowing vertical pin
       const pin = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.0016, 0.0052, pinHeight, 10),
+        new THREE.CylinderGeometry(0.0015, 0.0048, pinHeight, 10),
         new THREE.MeshBasicMaterial({
           color,
           transparent: true,
@@ -1064,17 +1159,15 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
       pin.position.y = pinHeight / 2;
       nodeGroup.add(pin);
 
-      // Crisp beacon orb
       const head = new THREE.Mesh(
-        new THREE.SphereGeometry(isSelected ? 0.017 : 0.011, 16, 16),
+        new THREE.SphereGeometry(isSelected ? 0.016 : 0.0105, 16, 16),
         new THREE.MeshBasicMaterial({ color }),
       );
       head.position.y = pinHeight;
       nodeGroup.add(head);
 
-      // Soft outer orb glow
       const headGlow = new THREE.Mesh(
-        new THREE.SphereGeometry(isSelected ? 0.027 : 0.018, 12, 12),
+        new THREE.SphereGeometry(isSelected ? 0.025 : 0.017, 12, 12),
         new THREE.MeshBasicMaterial({
           color,
           transparent: true,
@@ -1086,9 +1179,8 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
       headGlow.position.y = pinHeight;
       nodeGroup.add(headGlow);
 
-      // Standard expanding pulse ring
       const ring = new THREE.Mesh(
-        new THREE.RingGeometry(0.011, 0.017, 32),
+        new THREE.RingGeometry(0.011, 0.0165, 32),
         new THREE.MeshBasicMaterial({
           color,
           transparent: true,
@@ -1105,14 +1197,13 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
         mesh: ring,
         phase: (index * 0.27) % 1,
         speed: isSelected ? 0.85 : 0.5,
-        maxScale: isSelected ? 3.5 : 2.5,
+        maxScale: isSelected ? 3.4 : 2.4,
         baseOpacity: 0.78,
       });
 
-      // Extra live-join shockwave ring when WS reports a new agent online!
       if (isFreshJoin) {
         const burstRing = new THREE.Mesh(
-          new THREE.RingGeometry(0.014, 0.026, 36),
+          new THREE.RingGeometry(0.014, 0.025, 36),
           new THREE.MeshBasicMaterial({
             color: "#6ee7b7",
             transparent: true,
@@ -1129,13 +1220,13 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
           mesh: burstRing,
           phase: 0,
           speed: 1.25,
-          maxScale: 5.4,
+          maxScale: 5.2,
           baseOpacity: 0.95,
         });
       }
 
       const hitMesh = new THREE.Mesh(
-        new THREE.SphereGeometry(0.044, 10, 10),
+        new THREE.SphereGeometry(0.045, 10, 10),
         new THREE.MeshBasicMaterial({ visible: false }),
       );
       hitMesh.position.y = pinHeight * 0.6;
@@ -1151,15 +1242,16 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
       ctx.pickables.push(hitMesh);
 
       ctx.dynamicGroup.add(nodeGroup);
+      ctx.scalableMarkers.push(nodeGroup);
 
       if (!isLoginMode && (positionedMembers.length <= 18 || isSelected || isFreshJoin)) {
-        const labelPos = latLonToVec3(lat, lon, GLOBE_RADIUS + pinHeight + 0.024);
         ctx.labels.push({
           id: `node-${id}`,
           text: `${member.virtualIp}${member.city ? ` · ${member.city}` : ""}`,
           kind: "node",
           color,
-          position: labelPos,
+          baseSurface: surfaceUnit,
+          baseOffset: pinHeight + 0.022,
           priority: isSelected ? 92 : isFreshJoin ? 85 : 50,
         });
       }
@@ -1176,12 +1268,12 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
         const toLat = toSpread ? toSpread[0] : link.to.lat;
         const toLon = toSpread ? toSpread[1] : link.to.lon;
 
-        const start = latLonToVec3(fromLat, fromLon, GLOBE_RADIUS + 0.012);
-        const end = latLonToVec3(toLat, toLon, GLOBE_RADIUS + (link.toId === "server" ? 0.095 : 0.012));
+        const start = latLonToVec3(fromLat, fromLon, GLOBE_RADIUS + 0.01);
+        const end = latLonToVec3(toLat, toLon, GLOBE_RADIUS + (link.toId === "server" ? 0.075 : 0.01));
 
         const angle = start.clone().normalize().angleTo(end.clone().normalize());
-        const baseLift = link.kind === "direct" ? 0.2 : link.kind === "relay" ? 0.17 : 0.11;
-        const lift = Math.min(0.62, Math.max(baseLift, angle * 0.42));
+        const baseLift = link.kind === "direct" ? 0.16 : link.kind === "relay" ? 0.14 : 0.09;
+        const lift = Math.min(0.58, Math.max(baseLift, angle * 0.4));
 
         const mid = start.clone().add(end);
         if (mid.lengthSq() < 1e-4) {
@@ -1197,58 +1289,58 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
           link.kind === "direct" ? "#6ee7b7" : link.kind === "relay" ? "#fde68a" : "#7dd3fc";
 
         if (link.kind === "control") {
-          const pts = curve.getPoints(48);
+          const pts = curve.getPoints(56);
           const lineGeo = new THREE.BufferGeometry().setFromPoints(pts);
           const lineMat = new THREE.LineDashedMaterial({
             color: arcColor,
-            dashSize: 0.022,
-            gapSize: 0.022,
+            dashSize: 0.018,
+            gapSize: 0.02,
             transparent: true,
-            opacity: isSelected ? 0.85 : 0.26,
+            opacity: isSelected ? 0.85 : 0.24,
           });
           const line = new THREE.Line(lineGeo, lineMat);
           line.computeLineDistances();
           ctx.dynamicGroup.add(line);
         } else {
-          // Sleek glowing 3D tube
-          const tubeRadius = isSelected ? 0.0056 : 0.0032;
+          // Fine glowing 3D tube (clean & sharp even on close zoom)
+          const tubeRadius = isSelected ? 0.0044 : 0.0022;
           const tube = new THREE.Mesh(
-            new THREE.TubeGeometry(curve, 60, tubeRadius, 8, false),
+            new THREE.TubeGeometry(curve, 72, tubeRadius, 8, false),
             new THREE.MeshBasicMaterial({
               color: arcColor,
               transparent: true,
-              opacity: isSelected ? 0.92 : 0.56,
+              opacity: isSelected ? 0.92 : 0.54,
               blending: THREE.AdditiveBlending,
               depthWrite: false,
             }),
           );
           ctx.dynamicGroup.add(tube);
 
-          // Fine bright inner filament
-          const pts = curve.getPoints(60);
+          // Razor-sharp inner filament
+          const pts = curve.getPoints(72);
           const coreLine = new THREE.Line(
             new THREE.BufferGeometry().setFromPoints(pts),
             new THREE.LineBasicMaterial({
               color: pulseColor,
               transparent: true,
-              opacity: isSelected ? 1 : 0.72,
+              opacity: isSelected ? 1 : 0.78,
               blending: THREE.AdditiveBlending,
             }),
           );
           ctx.dynamicGroup.add(coreLine);
 
-          // Bidirectional sleek comet-trail data pulses (head + 4 trailing embers)
+          // Bidirectional comet-trail pulses
           for (let p = 0; p < 2; p++) {
             const segments: THREE.Mesh[] = [];
             const tailSteps = 5;
             for (let s = 0; s < tailSteps; s++) {
-              const r = s === 0 ? 0.0072 : 0.0058 * (1 - s * 0.14);
+              const r = s === 0 ? 0.0062 : 0.0048 * (1 - s * 0.14);
               const segMesh = new THREE.Mesh(
                 new THREE.SphereGeometry(r, 8, 8),
                 new THREE.MeshBasicMaterial({
                   color: s === 0 ? "#ffffff" : pulseColor,
                   transparent: true,
-                  opacity: s === 0 ? 0.96 : 0.68 * (1 - s / tailSteps),
+                  opacity: s === 0 ? 0.96 : 0.65 * (1 - s / tailSteps),
                   blending: THREE.AdditiveBlending,
                   depthWrite: false,
                 }),
@@ -1266,7 +1358,7 @@ export const Globe3D = forwardRef<Globe3DHandle, Globe3DProps>(function Globe3D(
           }
 
           const hitTube = new THREE.Mesh(
-            new THREE.TubeGeometry(curve, 24, 0.017, 6, false),
+            new THREE.TubeGeometry(curve, 24, 0.015, 6, false),
             new THREE.MeshBasicMaterial({ visible: false }),
           );
           hitTube.userData = {

@@ -4,7 +4,7 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import { feature } from "topojson-client";
 import type { FeatureCollection, Geometry } from "geojson";
 import type { GeometryCollection, Topology } from "topojson-specification";
-import world from "world-atlas/countries-110m.json";
+import world from "world-atlas/countries-50m.json";
 import type { MapCity, MapCountry, MapLink, MapMember, ServerNode } from "./api";
 import type { SelectedEntity } from "./Globe3D";
 import { alphaFromId } from "./iso";

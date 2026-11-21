@@ -16,7 +16,7 @@ export default defineConfig({
         manualChunks: {
           three: ["three"],
           maplibre: ["maplibre-gl"],
-          world: ["world-atlas/countries-110m.json", "topojson-client"],
+          world: ["world-atlas/countries-50m.json", "topojson-client"],
         },
       },
     },
