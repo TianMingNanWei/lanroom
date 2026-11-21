@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -274,10 +275,9 @@ func userJSON(user userRow, perms []string) map[string]any {
 	}
 }
 
-func (s *Server) current(c *gin.Context) (actor, error) {
-	header := c.GetHeader("Authorization")
-	token := strings.TrimPrefix(header, "Bearer ")
-	if token == "" || token == header {
+func (s *Server) authToken(token string) (actor, error) {
+	token = strings.TrimSpace(token)
+	if token == "" {
 		return actor{}, fail(http.StatusUnauthorized, "需要登录")
 	}
 	claims, err := parseJWT(s.secret, token, s.now())
@@ -313,6 +313,15 @@ func (s *Server) current(c *gin.Context) (actor, error) {
 		return actor{}, err
 	}
 	return actor{user: user, perms: perms}, nil
+}
+
+func (s *Server) current(c *gin.Context) (actor, error) {
+	header := c.GetHeader("Authorization")
+	token := strings.TrimPrefix(header, "Bearer ")
+	if token == "" || token == header {
+		return actor{}, fail(http.StatusUnauthorized, "需要登录")
+	}
+	return s.authToken(token)
 }
 
 func (s *Server) need(c *gin.Context, code string) (actor, error) {
@@ -804,25 +813,19 @@ func scanRoom(row scanner) (roomRow, error) {
 	return room, nil
 }
 
-func (s *Server) rooms(c *gin.Context) {
-	actor, err := s.need(c, "room:read")
+func (s *Server) buildRooms(ctx context.Context, act actor, q string) ([]map[string]any, error) {
+	rows, err := s.openRooms(act.user.ID, allows(act.perms, "room:manage"))
 	if err != nil {
-		writeErr(c, err)
-		return
+		return nil, err
 	}
-	rows, err := s.openRooms(actor.user.ID, allows(actor.perms, "room:manage"))
-	if err != nil {
-		writeErr(c, err)
-		return
-	}
-	q := strings.TrimSpace(c.Query("q"))
+	q = strings.TrimSpace(q)
 	items := []map[string]any{}
 	for _, room := range rows {
 		if q != "" && !strings.Contains(room.Name, q) {
 			continue
 		}
 		owner, _ := s.loadUser(room.OwnerID)
-		text, _ := s.store.Get(c.Request.Context(), liveKey(room.Name))
+		text, _ := s.store.Get(ctx, liveKey(room.Name))
 		live := parseLive(text)
 		mode := "idle"
 		if len(live) >= 2 {
@@ -850,16 +853,63 @@ func (s *Server) rooms(c *gin.Context) {
 			"owner":       owner.Username,
 			"ownerId":     room.OwnerID,
 			"createdAt":   stamp(room.Created),
-			"mine":        room.OwnerID == actor.user.ID,
+			"mine":        room.OwnerID == act.user.ID,
 			"onlineCount": len(live),
 			"mode":        mode,
 		})
 	}
+	return items, nil
+}
+
+func (s *Server) rooms(c *gin.Context) {
+	act, err := s.need(c, "room:read")
+	if err != nil {
+		writeErr(c, err)
+		return
+	}
+	items, err := s.buildRooms(c.Request.Context(), act, c.Query("q"))
+	if err != nil {
+		writeErr(c, err)
+		return
+	}
 	writeJSON(c, http.StatusOK, map[string]any{"items": items})
 }
 
+func (s *Server) doCreateRoom(ctx context.Context, act actor, rawName string) (string, error) {
+	if !allows(act.perms, "room:write") {
+		return "", fail(http.StatusForbidden, "没有权限")
+	}
+	name := strings.TrimSpace(rawName)
+	if !validRoom(name) {
+		return "", fail(http.StatusBadRequest, "房间名不能包含冒号或控制字符")
+	}
+	var existingID int64
+	var closed any
+	err := s.db.QueryRow(s.q(`SELECT id, closed_at FROM rooms WHERE name = ?`), name).Scan(&existingID, &closed)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+	if err == nil {
+		if _, ok, timeErr := asTime(closed); timeErr != nil {
+			return "", timeErr
+		} else if ok {
+			if _, err := s.db.Exec(s.q(`UPDATE rooms SET owner_id = ?, closed_at = NULL, created_at = ? WHERE id = ?`), act.user.ID, s.now(), existingID); err != nil {
+				return "", err
+			}
+		} else {
+			return "", fail(http.StatusConflict, "房间已存在")
+		}
+	} else if _, err := s.db.Exec(s.q(`INSERT INTO rooms (name, owner_id, created_at, closed_at) VALUES (?, ?, ?, NULL)`), name, act.user.ID, s.now()); err != nil {
+		return "", err
+	}
+	if err := s.store.Set(ctx, roomKey(name), strconv.FormatInt(act.user.ID, 10), 0); err != nil {
+		return "", err
+	}
+	return name, nil
+}
+
 func (s *Server) createRoom(c *gin.Context) {
-	actor, err := s.need(c, "room:write")
+	act, err := s.need(c, "room:write")
 	if err != nil {
 		writeErr(c, err)
 		return
@@ -871,36 +921,8 @@ func (s *Server) createRoom(c *gin.Context) {
 		writeErr(c, err)
 		return
 	}
-	name := strings.TrimSpace(body.Name)
-	if !validRoom(name) {
-		writeErr(c, fail(http.StatusBadRequest, "房间名不能包含冒号或控制字符"))
-		return
-	}
-	var existingID int64
-	var closed any
-	err = s.db.QueryRow(s.q(`SELECT id, closed_at FROM rooms WHERE name = ?`), name).Scan(&existingID, &closed)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		writeErr(c, err)
-		return
-	}
-	if err == nil {
-		if _, ok, timeErr := asTime(closed); timeErr != nil {
-			writeErr(c, timeErr)
-			return
-		} else if ok {
-			if _, err := s.db.Exec(s.q(`UPDATE rooms SET owner_id = ?, closed_at = NULL, created_at = ? WHERE id = ?`), actor.user.ID, s.now(), existingID); err != nil {
-				writeErr(c, err)
-				return
-			}
-		} else {
-			writeErr(c, fail(http.StatusConflict, "房间已存在"))
-			return
-		}
-	} else if _, err := s.db.Exec(s.q(`INSERT INTO rooms (name, owner_id, created_at, closed_at) VALUES (?, ?, ?, NULL)`), name, actor.user.ID, s.now()); err != nil {
-		writeErr(c, err)
-		return
-	}
-	if err := s.store.Set(c.Request.Context(), roomKey(name), strconv.FormatInt(actor.user.ID, 10), 0); err != nil {
+	name, err := s.doCreateRoom(c.Request.Context(), act, body.Name)
+	if err != nil {
 		writeErr(c, err)
 		return
 	}
@@ -916,48 +938,62 @@ func (s *Server) openRoom(name string) (roomRow, error) {
 	return room, err
 }
 
-func (s *Server) closeRoom(c *gin.Context) {
-	actor, err := s.need(c, "room:read")
-	if err != nil {
-		writeErr(c, err)
-		return
+func (s *Server) doCloseRoom(ctx context.Context, act actor, name string) error {
+	if !allows(act.perms, "room:read") {
+		return fail(http.StatusForbidden, "没有权限")
 	}
-	room, err := s.openRoom(c.Param("name"))
+	room, err := s.openRoom(name)
 	if err != nil {
-		writeErr(c, err)
-		return
+		return err
 	}
-	if room.OwnerID != actor.user.ID && !allows(actor.perms, "room:manage") {
-		writeErr(c, fail(http.StatusForbidden, "只能关闭自己的房间"))
-		return
+	if room.OwnerID != act.user.ID && !allows(act.perms, "room:manage") {
+		return fail(http.StatusForbidden, "只能关闭自己的房间")
 	}
 	if _, err := s.db.Exec(s.q(`UPDATE rooms SET closed_at = ? WHERE id = ?`), s.now(), room.ID); err != nil {
+		return err
+	}
+	return s.store.Del(ctx, roomKey(room.Name), liveKey(room.Name))
+}
+
+func (s *Server) closeRoom(c *gin.Context) {
+	act, err := s.need(c, "room:read")
+	if err != nil {
 		writeErr(c, err)
 		return
 	}
-	if err := s.store.Del(c.Request.Context(), roomKey(room.Name), liveKey(room.Name)); err != nil {
+	if err := s.doCloseRoom(c.Request.Context(), act, c.Param("name")); err != nil {
 		writeErr(c, err)
 		return
 	}
 	writeJSON(c, http.StatusOK, map[string]bool{"ok": true})
 }
 
-func (s *Server) ticket(c *gin.Context) {
-	actor, err := s.need(c, "room:write")
-	if err != nil {
-		writeErr(c, err)
-		return
+func (s *Server) doIssueTicket(act actor, name string) (string, time.Time, error) {
+	if !allows(act.perms, "room:write") {
+		return "", time.Time{}, fail(http.StatusForbidden, "没有权限")
 	}
-	room, err := s.openRoom(c.Param("name"))
+	room, err := s.openRoom(name)
 	if err != nil {
-		writeErr(c, err)
-		return
+		return "", time.Time{}, err
 	}
-	if room.OwnerID != actor.user.ID && !allows(actor.perms, "room:manage") {
-		writeErr(c, fail(http.StatusForbidden, "只能加入自己的房间"))
-		return
+	if room.OwnerID != act.user.ID && !allows(act.perms, "room:manage") {
+		return "", time.Time{}, fail(http.StatusForbidden, "只能加入自己的房间")
 	}
 	token, exp := issueTicket(s.secret, room.Name, room.OwnerID, s.now())
+	return token, exp, nil
+}
+
+func (s *Server) ticket(c *gin.Context) {
+	act, err := s.need(c, "room:write")
+	if err != nil {
+		writeErr(c, err)
+		return
+	}
+	token, exp, err := s.doIssueTicket(act, c.Param("name"))
+	if err != nil {
+		writeErr(c, err)
+		return
+	}
 	writeJSON(c, http.StatusOK, map[string]string{"token": token, "expiresAt": exp.UTC().Format(time.RFC3339)})
 }
 
@@ -1038,22 +1074,18 @@ func (s *Server) serverInfo() *serverNode {
 	return info
 }
 
-func (s *Server) members(c *gin.Context) {
-	actor, err := s.need(c, "room:read")
+func (s *Server) buildRoomMembers(ctx context.Context, act actor, name string) ([]map[string]any, error) {
+	if !allows(act.perms, "room:read") {
+		return nil, fail(http.StatusForbidden, "没有权限")
+	}
+	room, err := s.openRoom(name)
 	if err != nil {
-		writeErr(c, err)
-		return
+		return nil, err
 	}
-	room, err := s.openRoom(c.Param("name"))
-	if err != nil {
-		writeErr(c, err)
-		return
+	if room.OwnerID != act.user.ID && !allows(act.perms, "room:manage") {
+		return nil, fail(http.StatusForbidden, "不能查看这个房间")
 	}
-	if room.OwnerID != actor.user.ID && !allows(actor.perms, "room:manage") {
-		writeErr(c, fail(http.StatusForbidden, "不能查看这个房间"))
-		return
-	}
-	text, _ := s.store.Get(c.Request.Context(), liveKey(room.Name))
+	text, _ := s.store.Get(ctx, liveKey(room.Name))
 	items := []map[string]any{}
 	for _, member := range parseLive(text) {
 		items = append(items, map[string]any{
@@ -1066,16 +1098,40 @@ func (s *Server) members(c *gin.Context) {
 			"relayCount": member.RelayCount,
 		})
 	}
-	writeJSON(c, http.StatusOK, map[string]any{"items": items})
+	return items, nil
 }
 
-func (s *Server) kick(c *gin.Context) {
-	if _, err := s.need(c, "member:kick"); err != nil {
+func (s *Server) members(c *gin.Context) {
+	act, err := s.need(c, "room:read")
+	if err != nil {
 		writeErr(c, err)
 		return
 	}
-	name := c.Param("name")
+	items, err := s.buildRoomMembers(c.Request.Context(), act, c.Param("name"))
+	if err != nil {
+		writeErr(c, err)
+		return
+	}
+	writeJSON(c, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) doKickMember(ctx context.Context, act actor, name, rawMAC string) error {
+	if !allows(act.perms, "member:kick") {
+		return fail(http.StatusForbidden, "没有权限")
+	}
 	if _, err := s.openRoom(name); err != nil {
+		return err
+	}
+	mac := strings.ToLower(strings.TrimSpace(rawMAC))
+	if mac == "" {
+		return fail(http.StatusBadRequest, "缺少成员地址")
+	}
+	return s.store.Set(ctx, kickKey(name, mac), "1", 120*time.Second)
+}
+
+func (s *Server) kick(c *gin.Context) {
+	act, err := s.need(c, "member:kick")
+	if err != nil {
 		writeErr(c, err)
 		return
 	}
@@ -1086,12 +1142,7 @@ func (s *Server) kick(c *gin.Context) {
 		writeErr(c, err)
 		return
 	}
-	mac := strings.ToLower(strings.TrimSpace(body.MAC))
-	if mac == "" {
-		writeErr(c, fail(http.StatusBadRequest, "缺少成员地址"))
-		return
-	}
-	if err := s.store.Set(c.Request.Context(), kickKey(name, mac), "1", 120*time.Second); err != nil {
+	if err := s.doKickMember(c.Request.Context(), act, c.Param("name"), body.MAC); err != nil {
 		writeErr(c, err)
 		return
 	}
@@ -1123,18 +1174,14 @@ func (s *Server) remember(room, mac, ip string, place *Place) error {
 	return err
 }
 
-func (s *Server) worldMap(c *gin.Context) {
-	actor, err := s.need(c, "map:read")
-	if err != nil {
-		writeErr(c, err)
-		return
+func (s *Server) buildWorldMap(ctx context.Context, act actor, filter string) (map[string]any, error) {
+	if !allows(act.perms, "map:read") {
+		return nil, fail(http.StatusForbidden, "没有权限")
 	}
-	rows, err := s.openRooms(actor.user.ID, allows(actor.perms, "room:manage"))
+	rows, err := s.openRooms(act.user.ID, allows(act.perms, "room:manage"))
 	if err != nil {
-		writeErr(c, err)
-		return
+		return nil, err
 	}
-	filter := c.Query("room")
 	if filter != "" {
 		kept := rows[:0]
 		for _, room := range rows {
@@ -1175,7 +1222,7 @@ func (s *Server) worldMap(c *gin.Context) {
 	links := []mapLink{}
 	for _, room := range rows {
 		owner, _ := s.loadUser(room.OwnerID)
-		text, _ := s.store.Get(c.Request.Context(), liveKey(room.Name))
+		text, _ := s.store.Get(ctx, liveKey(room.Name))
 		roomLive := parseLive(text)
 		roomNodes := make([]locatedNode, 0, len(roomLive))
 		for _, member := range roomLive {
@@ -1213,8 +1260,7 @@ func (s *Server) worldMap(c *gin.Context) {
 				item["lat"] = place.Lat
 				item["lon"] = place.Lon
 				if err := s.remember(room.Name, member.MAC, member.IP, place); err != nil {
-					writeErr(c, err)
-					return
+					return nil, err
 				}
 				roomNodes = append(roomNodes, locatedNode{
 					id:         nodeID,
@@ -1304,20 +1350,18 @@ func (s *Server) worldMap(c *gin.Context) {
 		countries = append(countries, map[string]any{"country": code, "count": countryCount[code]})
 	}
 	logins := []map[string]any{}
-	if allows(actor.perms, "user:read") {
+	if allows(act.perms, "user:read") {
 		since := s.now().Add(-30 * 24 * time.Hour)
 		logRows, err := s.db.Query(s.q(`SELECT username, result, ip, created_at FROM login_logs WHERE created_at >= ? ORDER BY id DESC LIMIT 200`), since)
 		if err != nil {
-			writeErr(c, err)
-			return
+			return nil, err
 		}
 		defer logRows.Close()
 		for logRows.Next() {
 			var username, result, ip string
 			var created any
 			if err := logRows.Scan(&username, &result, &ip, &created); err != nil {
-				writeErr(c, err)
-				return
+				return nil, err
 			}
 			when, _, _ := asTime(created)
 			place := s.geo.lookup(ip)
@@ -1335,10 +1379,9 @@ func (s *Server) worldMap(c *gin.Context) {
 		}
 	}
 	names := []string{}
-	all, err := s.openRooms(actor.user.ID, allows(actor.perms, "room:manage"))
+	all, err := s.openRooms(act.user.ID, allows(act.perms, "room:manage"))
 	if err != nil {
-		writeErr(c, err)
-		return
+		return nil, err
 	}
 	for _, room := range all {
 		names = append(names, room.Name)
@@ -1352,9 +1395,23 @@ func (s *Server) worldMap(c *gin.Context) {
 	if logins == nil {
 		logins = []map[string]any{}
 	}
-	writeJSON(c, http.StatusOK, map[string]any{
+	return map[string]any{
 		"server": server, "members": members, "links": links, "cities": cities, "countries": countries, "logins": logins, "rooms": names,
-	})
+	}, nil
+}
+
+func (s *Server) worldMap(c *gin.Context) {
+	act, err := s.need(c, "map:read")
+	if err != nil {
+		writeErr(c, err)
+		return
+	}
+	payload, err := s.buildWorldMap(c.Request.Context(), act, c.Query("room"))
+	if err != nil {
+		writeErr(c, err)
+		return
+	}
+	writeJSON(c, http.StatusOK, payload)
 }
 
 func (s *Server) loginLogs(c *gin.Context) {

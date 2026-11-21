@@ -27,7 +27,10 @@ import {
   Sparkles,
   UserPlus,
   Users,
+  Wifi,
+  WifiOff,
   X,
+  Zap,
 } from "lucide-react";
 import {
   api,
@@ -35,16 +38,13 @@ import {
   setToken,
   token,
   type LoginLog,
-  type MapCity,
-  type MapCountry,
-  type MapLink,
   type MapMember,
+  type Member,
   type Role,
-  type Room,
-  type ServerNode,
   type User,
 } from "./api";
 import { Globe3D, type Globe3DHandle, type SelectedEntity } from "./Globe3D";
+import { useLivePanel, type LiveEvent, type LivePanelController, type WsStatus } from "./ws";
 
 const LazyMapView = lazy(() => import("./MapView").then((m) => ({ default: m.MapView })));
 import { Badge } from "@/components/ui/badge";
@@ -128,12 +128,39 @@ function modeBadge(mode?: string) {
   );
 }
 
+function WsStatusPill({ status, rttMs, compact = false }: { status: WsStatus; rttMs: number | null; compact?: boolean }) {
+  const isLive = status === "live";
+  const isRetry = status === "reconnecting" || status === "connecting";
+  const dotClass = isLive
+    ? "bg-emerald-400 text-emerald-400"
+    : isRetry
+      ? "bg-amber-400 text-amber-400"
+      : "bg-rose-400 text-rose-400";
+  const pillClass = isLive
+    ? "border-emerald-500/35 bg-emerald-500/12 text-emerald-200"
+    : isRetry
+      ? "border-amber-500/35 bg-amber-500/12 text-amber-200"
+      : "border-rose-500/35 bg-rose-500/12 text-rose-200";
+  const label = isLive ? "WS 实时" : status === "reconnecting" ? "WS 重连中" : status === "connecting" ? "WS 连接中" : "WS 离线";
+
+  return (
+    <span className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] font-medium ${pillClass}`}>
+      <span className={`live-dot ${dotClass}`} style={{ width: 6, height: 6 }} />
+      <span>{label}</span>
+      {!compact && isLive && rttMs != null && <span className="mono-num text-emerald-300/90">{rttMs}ms</span>}
+    </span>
+  );
+}
+
 export function App() {
   const saved = token();
   const [user, setUser] = useState<User | null>(null);
   const [page, setPage] = useState<Page>(saved ? pageFromHash() : "login");
   const [error, setError] = useState("");
   const [session, setSession] = useState<Session>(saved ? "checking" : "out");
+
+  const wsEnabled = session === "in" && !!user && page !== "login";
+  const live = useLivePanel(wsEnabled);
 
   useEffect(() => {
     const onHash = () => {
@@ -201,23 +228,23 @@ export function App() {
   const isMapPage = page === "map";
 
   return (
-    <div className="flex min-h-screen bg-[#050a14] text-slate-100">
+    <div className="flex min-h-screen bg-[#030712] text-slate-100">
       {/* Sleek Obsidian Sidebar */}
-      <aside className="flex w-64 shrink-0 flex-col border-r border-slate-800/80 bg-[#070e1c]">
-        <div className="flex items-center gap-3 border-b border-slate-800/70 px-5 py-5">
+      <aside className="flex w-60 shrink-0 flex-col border-r border-slate-800/75 bg-[#050b16]">
+        <div className="flex items-center gap-3 border-b border-slate-800/70 px-4 py-4">
           <div className="grid h-10 w-10 place-items-center rounded-xl border border-cyan-400/35 bg-gradient-to-br from-cyan-500/25 via-sky-500/15 to-violet-500/25 shadow-[0_0_24px_rgba(56,189,248,0.22)]">
             <Network className="h-5 w-5 text-cyan-300" />
           </div>
           <div className="min-w-0">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5">
               <span className="text-sm font-semibold tracking-[0.14em] text-white">LANROOM</span>
-              <span className="rounded bg-cyan-500/15 px-1.5 py-0.5 text-[10px] font-medium text-cyan-300">3D</span>
+              <span className="rounded bg-cyan-500/15 px-1.5 py-0.5 text-[10px] font-medium text-cyan-300">WS·3D</span>
             </div>
             <p className="truncate text-[11px] text-slate-400">全球虚拟局域网控制台</p>
           </div>
         </div>
 
-        <nav className="flex-1 space-y-1 px-3 py-4">
+        <nav className="flex-1 space-y-1 px-2.5 py-3.5">
           {links
             .filter((link) => !link.code || can(user, link.code))
             .map((link) => {
@@ -229,8 +256,8 @@ export function App() {
                   href={`#/${link.id}`}
                   className={`group relative flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition-all ${
                     active
-                      ? "bg-gradient-to-r from-cyan-500/18 to-sky-500/8 text-white shadow-[inset_0_0_0_1px_rgba(56,189,248,0.28)]"
-                      : "text-slate-400 hover:bg-slate-800/50 hover:text-slate-100"
+                      ? "bg-gradient-to-r from-cyan-500/18 to-sky-500/6 text-white shadow-[inset_0_0_0_1px_rgba(56,189,248,0.28)]"
+                      : "text-slate-400 hover:bg-slate-800/45 hover:text-slate-100"
                   }`}
                 >
                   {active && (
@@ -246,11 +273,32 @@ export function App() {
             })}
         </nav>
 
+        {/* Live WebSocket Channel Telemetry Card */}
+        <div className="px-3 pb-2.5">
+          <div className="rounded-xl border border-slate-800/80 bg-[#081122] px-3 py-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5 text-[11px] font-medium text-slate-300">
+                {live.status === "live" ? (
+                  <Wifi className="h-3.5 w-3.5 text-emerald-400" />
+                ) : (
+                  <WifiOff className="h-3.5 w-3.5 text-amber-400" />
+                )}
+                <span>实时通道</span>
+              </div>
+              <WsStatusPill status={live.status} rttMs={live.rttMs} compact />
+            </div>
+            <div className="mono-num mt-1.5 flex items-center justify-between text-[10px] text-slate-400">
+              <span>{live.rttMs != null ? `RTT ${live.rttMs} ms` : "等待握手"}</span>
+              <span>{live.lastSync ? `同步 ${live.lastSync}` : "—"}</span>
+            </div>
+          </div>
+        </div>
+
         {/* Bottom User Profile Card */}
         <div className="border-t border-slate-800/70 p-3">
-          <div className="flex items-center justify-between gap-2 rounded-xl border border-slate-800/80 bg-[#0b1426] p-3">
+          <div className="flex items-center justify-between gap-2 rounded-xl border border-slate-800/80 bg-[#091224] p-2.5">
             <div className="min-w-0">
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1.5">
                 <span className="truncate text-sm font-medium text-slate-100">{user.displayName || user.username}</span>
                 <span className={`rounded-full border px-1.5 py-0.5 text-[10px] font-medium ${roleBadgeStyle(user.role)}`}>
                   {user.role}
@@ -275,10 +323,10 @@ export function App() {
       <div className="flex min-w-0 flex-1 flex-col">
         {isMapPage ? (
           <main className="relative h-screen w-full overflow-hidden">
-            <MapPage user={user} onError={setError} />
+            <MapPage user={user} live={live} onError={setError} />
           </main>
         ) : (
-          <main className="flex-1 overflow-y-auto bg-[radial-gradient(ellipse_at_top_right,rgba(56,189,248,0.06),transparent_45%),#050a14] p-6 lg:p-8">
+          <main className="flex-1 overflow-y-auto bg-[radial-gradient(ellipse_at_top_right,rgba(56,189,248,0.06),transparent_45%),#030712] p-6 lg:p-8">
             <div className="mx-auto max-w-6xl">
               {error && (
                 <div className="mb-5 flex items-center justify-between rounded-xl border border-rose-500/40 bg-rose-500/12 px-4 py-3 text-sm text-rose-200">
@@ -288,7 +336,7 @@ export function App() {
                   </button>
                 </div>
               )}
-              {page === "rooms" && <RoomsPage user={user} onError={setError} />}
+              {page === "rooms" && <RoomsPage user={user} live={live} onError={setError} />}
               {page === "users" && <UsersPage onError={setError} />}
               {page === "roles" && <RolesPage onError={setError} />}
               {page === "logs" && <LogsPage onError={setError} />}
@@ -428,16 +476,24 @@ function StatCard({
   );
 }
 
-function MapPage({ user, onError }: { user: User; onError: (msg: string) => void }) {
+const REGION_PRESETS: { id: string; label: string; lat?: number; lon?: number; dist?: number }[] = [
+  { id: "fit", label: "全景" },
+  { id: "apac", label: "亚太", lat: 26, lon: 112, dist: 2.38 },
+  { id: "eu", label: "欧洲", lat: 50, lon: 10, dist: 2.35 },
+  { id: "na", label: "北美", lat: 38, lon: -96, dist: 2.45 },
+  { id: "server", label: "主节点" },
+];
+
+function MapPage({
+  user,
+  live,
+  onError,
+}: {
+  user: User;
+  live: LivePanelController;
+  onError: (msg: string) => void;
+}) {
   const globeRef = useRef<Globe3DHandle>(null);
-  const [room, setRoom] = useState("");
-  const [rooms, setRooms] = useState<string[]>([]);
-  const [server, setServer] = useState<ServerNode | null>(null);
-  const [rawMembers, setRawMembers] = useState<MapMember[]>([]);
-  const [links, setLinks] = useState<MapLink[]>([]);
-  const [cities, setCities] = useState<MapCity[]>([]);
-  const [countries, setCountries] = useState<MapCountry[]>([]);
-  const [loginMembers, setLoginMembers] = useState<MapMember[]>([]);
 
   const [viewMode, setViewMode] = useState<"3d" | "2d">("3d");
   const [logins, setLogins] = useState(false);
@@ -445,55 +501,54 @@ function MapPage({ user, onError }: { user: User; onError: (msg: string) => void
   const [showControlLinks, setShowControlLinks] = useState(true);
   const [selected, setSelected] = useState<SelectedEntity | null>(null);
   const [showList, setShowList] = useState(true);
-  const [lastSync, setLastSync] = useState<string>("");
+  const [showFeed, setShowFeed] = useState(true);
   const [kickBusy, setKickBusy] = useState(false);
 
   const canReadLogs = can(user, "user:read");
   const isLoginMode = logins && canReadLogs;
 
-  useEffect(() => {
-    let stop = false;
-    const load = () => {
-      api
-        .map(room)
-        .then((body) => {
-          if (stop) return;
-          setServer(body.server ?? null);
-          setRooms(body.rooms ?? []);
-          setRawMembers(body.members ?? []);
-          setLinks(body.links ?? []);
-          setCities(body.cities ?? []);
-          setCountries(body.countries ?? []);
-          setLoginMembers(
-            (body.logins ?? []).map((item, idx) => ({
-              id: `login:${idx}:${item.username}:${item.ip}`,
-              room: "登录",
-              owner: item.username,
-              mac: item.result,
-              virtualIp: item.createdAt,
-              source: item.ip,
-              country: item.country,
-              city: item.city,
-              lat: item.lat,
-              lon: item.lon,
-            })),
-          );
-          const now = new Date();
-          setLastSync(now.toTimeString().slice(0, 8));
-        })
-        .catch(() => undefined);
-    };
-    load();
-    const timer = window.setInterval(load, 3000);
-    return () => {
-      stop = true;
-      window.clearInterval(timer);
-    };
-  }, [room]);
+  const mapData = live.mapData;
+  const server = mapData?.server ?? null;
+  const rooms = mapData?.rooms ?? [];
+  const rawMembers = mapData?.members ?? [];
+  const links = mapData?.links ?? [];
+  const cities = mapData?.cities ?? [];
+  const countries = mapData?.countries ?? [];
+
+  const loginMembers = useMemo<MapMember[]>(
+    () =>
+      (mapData?.logins ?? []).map((item, idx) => ({
+        id: `login:${idx}:${item.username}:${item.ip}`,
+        room: "登录",
+        owner: item.username,
+        mac: item.result,
+        virtualIp: item.createdAt,
+        source: item.ip,
+        country: item.country,
+        city: item.city,
+        lat: item.lat,
+        lon: item.lon,
+      })),
+    [mapData?.logins],
+  );
 
   const activeMembers = isLoginMode ? loginMembers : rawMembers;
   const activeCities = isLoginMode ? [] : cities;
   const activeCountries = isLoginMode ? [] : countries;
+
+  // Keep selected entity automatically synchronized with live WS snapshots
+  const liveSelected = useMemo<SelectedEntity | null>(() => {
+    if (!selected) return null;
+    if (selected.kind === "server") {
+      return server ? { kind: "server", server } : selected;
+    }
+    if (selected.kind === "member") {
+      const fresh = activeMembers.find((m) => m.id && m.id === selected.member.id);
+      return fresh ? { kind: "member", member: fresh } : selected;
+    }
+    const freshLink = links.find((l) => l.id === selected.link.id);
+    return freshLink ? { kind: "link", link: freshLink } : selected;
+  }, [selected, server, activeMembers, links]);
 
   const stats = useMemo(() => {
     const directLinks = links.filter((l) => l.kind === "direct").length;
@@ -508,16 +563,16 @@ function MapPage({ user, onError }: { user: User; onError: (msg: string) => void
   }, [rawMembers, links]);
 
   const selectedId = useMemo(() => {
-    if (!selected) return null;
-    if (selected.kind === "server") return "server";
-    if (selected.kind === "member") return selected.member.id ?? null;
-    return selected.link.id;
-  }, [selected]);
+    if (!liveSelected) return null;
+    if (liveSelected.kind === "server") return "server";
+    if (liveSelected.kind === "member") return liveSelected.member.id ?? null;
+    return liveSelected.link.id;
+  }, [liveSelected]);
 
   async function kickSelectedMember(member: MapMember) {
     setKickBusy(true);
     try {
-      await api.kick(member.room, member.mac);
+      await live.action("kick", { room: member.room, mac: member.mac });
       setSelected(null);
     } catch (err) {
       onError(err instanceof Error ? err.message : String(err));
@@ -526,8 +581,18 @@ function MapPage({ user, onError }: { user: User; onError: (msg: string) => void
     }
   }
 
+  function focusEvent(ev: LiveEvent) {
+    const found = rawMembers.find((m) => m.id === ev.memberId);
+    if (found) {
+      setSelected({ kind: "member", member: found });
+      if (found.lat != null && found.lon != null) {
+        globeRef.current?.focusLatLon(found.lat, found.lon, 2.2);
+      }
+    }
+  }
+
   return (
-    <div className="relative h-full w-full overflow-hidden bg-[#050a14]">
+    <div className="relative h-full w-full overflow-hidden bg-[#030712]">
       {/* Main 3D Globe or 2D Tactical Map Canvas */}
       {viewMode === "3d" ? (
         <Globe3D
@@ -540,12 +605,13 @@ function MapPage({ user, onError }: { user: User; onError: (msg: string) => void
           autoRotate={autoRotate}
           showControlLinks={showControlLinks}
           selectedId={selectedId}
+          recentJoinIds={live.recentJoinIds}
           onSelect={setSelected}
         />
       ) : (
         <Suspense
           fallback={
-            <div className="grid h-full w-full place-items-center bg-[#060d1c] text-xs text-slate-400">
+            <div className="grid h-full w-full place-items-center bg-[#040a17] text-xs text-slate-400">
               正在加载 2D 战术平面图...
             </div>
           }
@@ -563,162 +629,167 @@ function MapPage({ user, onError }: { user: User; onError: (msg: string) => void
         </Suspense>
       )}
 
-      {/* Top Responsive Floating HUD Row (KPI Telemetry + View Controls, zero overlap on narrow screens) */}
+      {/* Top Floating HUD Row */}
       <div className="pointer-events-none absolute inset-x-4 top-4 z-20 flex flex-wrap items-start justify-between gap-2.5">
-        <div className="hud-glass pointer-events-auto flex flex-wrap items-center gap-4 rounded-2xl px-4 py-3">
+        {/* Compact Left Telemetry Pill */}
+        <div className="hud-glass pointer-events-auto flex flex-wrap items-center gap-3.5 rounded-2xl px-4 py-2.5">
           <div>
             <div className="flex items-center gap-2">
-              <span className="live-dot bg-emerald-400 text-emerald-400" />
               <span className="text-xs font-semibold tracking-wider text-slate-100">
                 {isLoginMode ? "全球登录溯源" : "全球实时拓扑"}
               </span>
-              {lastSync && <span className="mono-num text-[10px] text-slate-400">{lastSync}</span>}
+              <WsStatusPill status={live.status} rttMs={live.rttMs} />
             </div>
             <p className="mt-0.5 text-[11px] text-slate-400">
               {server
                 ? `主节点 ${server.city || server.ip} · ${server.ip}`
-                : "拖拽旋转地球 · 点击节点或 3D 弧线查看详情"}
+                : "拖拽旋转地球 · 点击节点或 3D 飞线查看遥测"}
             </p>
           </div>
-          <div className="hidden h-7 w-px bg-slate-700/70 sm:block" />
-          <div className="flex items-center gap-4">
+          <div className="hidden h-7 w-px bg-slate-700/70 md:block" />
+          <div className="flex items-center gap-3.5">
             <div>
               <div className="text-[10px] text-slate-400">在线节点</div>
-              <div className="mono-num text-base font-semibold text-cyan-300">{stats.nodes}</div>
+              <div className="mono-num text-base font-semibold leading-tight text-cyan-300">{stats.nodes}</div>
             </div>
             <div>
               <div className="text-[10px] text-slate-400">活跃房间</div>
-              <div className="mono-num text-base font-semibold text-white">{stats.rooms}</div>
+              <div className="mono-num text-base font-semibold leading-tight text-white">{stats.rooms}</div>
             </div>
             <div>
               <div className="text-[10px] text-slate-400">P2P 直连</div>
-              <div className="mono-num text-base font-semibold text-emerald-300">{stats.directLinks}</div>
+              <div className="mono-num text-base font-semibold leading-tight text-emerald-300">{stats.directLinks}</div>
             </div>
             <div>
               <div className="text-[10px] text-slate-400">中转链路</div>
-              <div className="mono-num text-base font-semibold text-amber-300">{stats.relayLinks}</div>
+              <div className="mono-num text-base font-semibold leading-tight text-amber-300">{stats.relayLinks}</div>
             </div>
           </div>
         </div>
 
-        {/* View Controls */}
+        {/* Right View Controls */}
         <div className="pointer-events-auto flex flex-wrap items-center justify-end gap-2">
-        <div className="hud-glass flex items-center gap-1.5 rounded-2xl p-1.5">
-          {/* Room filter */}
-          <Select value={room || "all"} onValueChange={(value) => setRoom(value === "all" ? "" : value)}>
-            <SelectTrigger className="h-8 w-36 border-slate-700/60 bg-slate-900/70 text-xs text-slate-100">
-              <SelectValue placeholder="全部房间" />
-            </SelectTrigger>
-            <SelectContent className="border-slate-700 bg-[#0d1629] text-slate-100">
-              <SelectItem value="all">全部房间</SelectItem>
-              {rooms.map((name) => (
-                <SelectItem key={name} value={name}>
-                  {name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <div className="hud-glass flex items-center gap-1.5 rounded-2xl p-1.5">
+            <Select
+              value={live.roomFilter || "all"}
+              onValueChange={(value) => live.setRoomFilter(value === "all" ? "" : value)}
+            >
+              <SelectTrigger className="h-8 w-32 border-slate-700/60 bg-slate-900/75 text-xs text-slate-100">
+                <SelectValue placeholder="全部房间" />
+              </SelectTrigger>
+              <SelectContent className="border-slate-700 bg-[#0b1326] text-slate-100">
+                <SelectItem value="all">全部房间</SelectItem>
+                {rooms.map((name) => (
+                  <SelectItem key={name} value={name}>
+                    {name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
 
-          {/* 3D / 2D Segmented Toggle */}
-          <div className="flex rounded-xl border border-slate-700/60 bg-slate-900/80 p-0.5 text-xs">
-            <button
-              onClick={() => setViewMode("3d")}
-              className={`flex items-center gap-1 rounded-lg px-2.5 py-1 font-medium transition ${
-                viewMode === "3d" ? "bg-cyan-500/25 text-cyan-200 shadow-sm" : "text-slate-400 hover:text-slate-200"
-              }`}
-            >
-              <Globe className="h-3.5 w-3.5" />
-              3D 地球
-            </button>
-            <button
-              onClick={() => setViewMode("2d")}
-              className={`flex items-center gap-1 rounded-lg px-2.5 py-1 font-medium transition ${
-                viewMode === "2d" ? "bg-cyan-500/25 text-cyan-200 shadow-sm" : "text-slate-400 hover:text-slate-200"
-              }`}
-            >
-              <MapIcon className="h-3.5 w-3.5" />
-              2D 平面
-            </button>
+            <div className="flex rounded-xl border border-slate-700/60 bg-slate-900/80 p-0.5 text-xs">
+              <button
+                onClick={() => setViewMode("3d")}
+                className={`flex items-center gap-1 rounded-lg px-2.5 py-1 font-medium transition ${
+                  viewMode === "3d" ? "bg-cyan-500/25 text-cyan-200 shadow-sm" : "text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                <Globe className="h-3.5 w-3.5" />
+                3D 地球
+              </button>
+              <button
+                onClick={() => setViewMode("2d")}
+                className={`flex items-center gap-1 rounded-lg px-2.5 py-1 font-medium transition ${
+                  viewMode === "2d" ? "bg-cyan-500/25 text-cyan-200 shadow-sm" : "text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                <MapIcon className="h-3.5 w-3.5" />
+                2D 平面
+              </button>
+            </div>
+
+            {canReadLogs && (
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  setLogins((v) => !v);
+                  setSelected(null);
+                }}
+                className={`h-8 rounded-xl px-2.5 text-xs ${
+                  isLoginMode
+                    ? "bg-violet-500/25 text-violet-200 hover:bg-violet-500/35"
+                    : "text-slate-300 hover:bg-slate-800/80 hover:text-white"
+                }`}
+              >
+                <Sparkles className="mr-1 h-3.5 w-3.5" />
+                {isLoginMode ? "节点拓扑" : "登录溯源"}
+              </Button>
+            )}
           </div>
 
-          {/* Members vs Logins Toggle */}
-          {canReadLogs && (
+          {/* 3D Camera & Layer Micro Controls */}
+          <div className="hud-glass flex items-center gap-1 rounded-2xl p-1.5">
+            {viewMode === "3d" && (
+              <>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  title={autoRotate ? "暂停地球自转" : "开启地球自转"}
+                  onClick={() => setAutoRotate((v) => !v)}
+                  className={`h-8 w-8 rounded-xl ${autoRotate ? "bg-cyan-500/20 text-cyan-300" : "text-slate-400 hover:text-white"}`}
+                >
+                  {autoRotate ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
+                </Button>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  title="聚焦服务器主节点"
+                  onClick={() => {
+                    globeRef.current?.focusServer();
+                    if (server) setSelected({ kind: "server", server });
+                  }}
+                  className="h-8 w-8 rounded-xl text-violet-300 hover:bg-violet-500/20 hover:text-violet-200"
+                >
+                  <Server className="h-3.5 w-3.5" />
+                </Button>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  title="适配全部节点视角"
+                  onClick={() => globeRef.current?.fitAll()}
+                  className="h-8 w-8 rounded-xl text-slate-300 hover:bg-slate-800 hover:text-white"
+                >
+                  <Compass className="h-3.5 w-3.5" />
+                </Button>
+              </>
+            )}
             <Button
-              size="sm"
+              size="icon"
               variant="ghost"
-              onClick={() => {
-                setLogins((v) => !v);
-                setSelected(null);
-              }}
-              className={`h-8 rounded-xl px-2.5 text-xs ${
-                isLoginMode
-                  ? "bg-violet-500/25 text-violet-200 hover:bg-violet-500/35"
-                  : "text-slate-300 hover:bg-slate-800/80 hover:text-white"
-              }`}
+              title={showControlLinks ? "隐藏心跳控制线" : "显示心跳控制线"}
+              onClick={() => setShowControlLinks((v) => !v)}
+              className={`h-8 w-8 rounded-xl ${showControlLinks ? "bg-sky-500/20 text-sky-300" : "text-slate-400 hover:text-white"}`}
             >
-              <Sparkles className="mr-1 h-3.5 w-3.5" />
-              {isLoginMode ? "切回节点拓扑" : "登录溯源"}
+              <Radio className="h-3.5 w-3.5" />
             </Button>
-          )}
-        </div>
-
-        {/* 3D Camera & Layer Micro Controls */}
-        <div className="hud-glass flex items-center gap-1 rounded-2xl p-1.5">
-          {viewMode === "3d" && (
-            <>
-              <Button
-                size="icon"
-                variant="ghost"
-                title={autoRotate ? "暂停地球自转" : "开启地球自转"}
-                onClick={() => setAutoRotate((v) => !v)}
-                className={`h-8 w-8 rounded-xl ${autoRotate ? "bg-cyan-500/20 text-cyan-300" : "text-slate-400 hover:text-white"}`}
-              >
-                {autoRotate ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
-              </Button>
-              <Button
-                size="icon"
-                variant="ghost"
-                title="聚焦服务器主节点"
-                onClick={() => {
-                  globeRef.current?.focusServer();
-                  if (server) setSelected({ kind: "server", server });
-                }}
-                className="h-8 w-8 rounded-xl text-violet-300 hover:bg-violet-500/20 hover:text-violet-200"
-              >
-                <Server className="h-3.5 w-3.5" />
-              </Button>
-              <Button
-                size="icon"
-                variant="ghost"
-                title="适配全部节点视角"
-                onClick={() => globeRef.current?.fitAll()}
-                className="h-8 w-8 rounded-xl text-slate-300 hover:bg-slate-800 hover:text-white"
-              >
-                <Compass className="h-3.5 w-3.5" />
-              </Button>
-            </>
-          )}
-          <Button
-            size="icon"
-            variant="ghost"
-            title={showControlLinks ? "隐藏心跳控制线" : "显示心跳控制线"}
-            onClick={() => setShowControlLinks((v) => !v)}
-            className={`h-8 w-8 rounded-xl ${showControlLinks ? "bg-sky-500/20 text-sky-300" : "text-slate-400 hover:text-white"}`}
-          >
-            <Radio className="h-3.5 w-3.5" />
-          </Button>
-        </div>
+          </div>
         </div>
       </div>
 
-      {/* Bottom-Left Floating Legend & Quick Jump Node List */}
+      {/* Bottom-Left Floating Node List & Legend */}
       <div className="absolute bottom-4 left-4 z-20 flex w-72 max-w-[calc(100%-2rem)] flex-col gap-2">
         {showList && (
-          <div className="hud-glass flex max-h-60 flex-col rounded-2xl p-3">
+          <div className="hud-glass flex max-h-64 flex-col rounded-2xl p-3">
             <div className="mb-2 flex items-center justify-between">
-              <span className="text-xs font-medium text-slate-200">
-                {isLoginMode ? "近期登录节点" : "在线节点与主服"}
-              </span>
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs font-medium text-slate-200">
+                  {isLoginMode ? "近期登录节点" : "在线节点与主服"}
+                </span>
+                <span className="mono-num rounded-full bg-cyan-500/15 px-1.5 py-0.5 text-[10px] text-cyan-300">
+                  {activeMembers.length}
+                </span>
+              </div>
               <button onClick={() => setShowList(false)} className="text-[11px] text-slate-400 hover:text-slate-200">
                 收起
               </button>
@@ -749,11 +820,12 @@ function MapPage({ user, onError }: { user: User; onError: (msg: string) => void
 
               {activeMembers.length === 0 ? (
                 <p className="py-3 text-center text-[11px] text-slate-400">
-                  {isLoginMode ? "暂无登录位置记录" : "当前暂无在线成员节点"}
+                  {isLoginMode ? "暂无登录位置记录" : "等待各地节点上线..."}
                 </p>
               ) : (
-                activeMembers.slice(0, 24).map((m, idx) => {
+                activeMembers.slice(0, 32).map((m, idx) => {
                   const key = m.id || `${m.room}:${m.mac}:${idx}`;
+                  const isFresh = Boolean(m.id && live.recentJoinIds.includes(m.id));
                   const dotColor = isLoginMode
                     ? m.mac === "ok"
                       ? "bg-cyan-400"
@@ -774,15 +846,20 @@ function MapPage({ user, onError }: { user: User; onError: (msg: string) => void
                       }}
                       className={`flex w-full items-center justify-between gap-2 rounded-xl px-2.5 py-1.5 text-left transition ${
                         selectedId === key
-                          ? "bg-cyan-500/20 text-white"
-                          : "text-slate-300 hover:bg-slate-800/70 hover:text-white"
+                          ? "bg-cyan-500/20 text-white shadow-[inset_0_0_0_1px_rgba(56,189,248,0.35)]"
+                          : isFresh
+                            ? "bg-emerald-500/15 text-emerald-100"
+                            : "text-slate-300 hover:bg-slate-800/70 hover:text-white"
                       }`}
                     >
                       <div className="flex min-w-0 items-center gap-2">
                         <span className={`h-2 w-2 shrink-0 rounded-full ${dotColor}`} />
                         <div className="min-w-0">
-                          <div className="mono-num truncate text-[11px] font-medium">
-                            {isLoginMode ? m.owner : `${m.room} · ${m.virtualIp}`}
+                          <div className="mono-num flex items-center gap-1.5 truncate text-[11px] font-medium">
+                            <span className="truncate">{isLoginMode ? m.owner : `${m.room} · ${m.virtualIp}`}</span>
+                            {isFresh && (
+                              <span className="rounded bg-emerald-400/20 px-1 text-[9px] text-emerald-300">NEW</span>
+                            )}
                           </div>
                           <div className="truncate text-[10px] text-slate-400">
                             {m.city || "未定位"} {m.country} · {m.source}
@@ -799,7 +876,7 @@ function MapPage({ user, onError }: { user: User; onError: (msg: string) => void
         )}
 
         {/* Compact Legend Strip */}
-        <div className="hud-glass flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5 rounded-2xl px-3.5 py-2.5 text-[11px] text-slate-300">
+        <div className="hud-glass flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5 rounded-2xl px-3.5 py-2 text-[11px] text-slate-300">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
             <span className="inline-flex items-center gap-1.5">
               <span className="h-2.5 w-2.5 rounded-sm bg-violet-400 shadow-[0_0_8px_#a855f7]" />
@@ -826,20 +903,101 @@ function MapPage({ user, onError }: { user: User; onError: (msg: string) => void
         </div>
       </div>
 
+      {/* Bottom-Center Quick 3D Camera Region Bar */}
+      {viewMode === "3d" && (
+        <div className="pointer-events-none absolute bottom-4 left-1/2 z-20 hidden -translate-x-1/2 xl:flex">
+          <div className="hud-pill pointer-events-auto flex items-center gap-1 rounded-full p-1">
+            {REGION_PRESETS.map((preset) => (
+              <button
+                key={preset.id}
+                onClick={() => {
+                  if (preset.id === "fit") globeRef.current?.fitAll();
+                  else if (preset.id === "server") globeRef.current?.focusServer();
+                  else if (preset.lat != null && preset.lon != null) {
+                    globeRef.current?.focusLatLon(preset.lat, preset.lon, preset.dist ?? 2.4);
+                  }
+                }}
+                className="rounded-full px-3 py-1 text-[11px] font-medium text-slate-300 transition hover:bg-cyan-500/20 hover:text-cyan-200"
+              >
+                {preset.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Bottom-Right Live WebSocket Activity Ticker (when Inspector Drawer is closed) */}
+      {!liveSelected && live.events.length > 0 && (
+        <div className="absolute bottom-4 right-4 z-20 w-72 max-w-[calc(100%-2rem)]">
+          {showFeed ? (
+            <div className="hud-glass rounded-2xl p-3">
+              <div className="mb-2 flex items-center justify-between">
+                <div className="flex items-center gap-1.5 text-xs font-medium text-slate-200">
+                  <Zap className="h-3.5 w-3.5 text-cyan-400" />
+                  <span>实时动态</span>
+                </div>
+                <button onClick={() => setShowFeed(false)} className="text-[11px] text-slate-400 hover:text-slate-200">
+                  收起
+                </button>
+              </div>
+              <div className="max-h-40 space-y-1.5 overflow-y-auto pr-1 text-[11px]">
+                {live.events.slice(0, 6).map((ev) => {
+                  const badge =
+                    ev.kind === "join"
+                      ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300"
+                      : ev.kind === "leave"
+                        ? "border-rose-500/40 bg-rose-500/15 text-rose-300"
+                        : "border-amber-500/40 bg-amber-500/15 text-amber-300";
+                  const label = ev.kind === "join" ? "上线" : ev.kind === "leave" ? "离线" : "切换";
+                  return (
+                    <button
+                      key={ev.id}
+                      onClick={() => focusEvent(ev)}
+                      className="animate-event-in flex w-full items-center justify-between gap-2 rounded-xl border border-slate-800/70 bg-slate-900/55 px-2.5 py-1.5 text-left transition hover:border-cyan-500/35 hover:bg-slate-800/70"
+                    >
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5">
+                          <span className={`rounded border px-1 py-0.2 text-[9px] font-medium ${badge}`}>{label}</span>
+                          <span className="mono-num truncate font-medium text-slate-100">
+                            {ev.virtualIp || ev.room}
+                          </span>
+                        </div>
+                        <div className="truncate text-[10px] text-slate-400">
+                          {ev.room} · {ev.city || "未定位"} {ev.country}
+                        </div>
+                      </div>
+                      <span className="mono-num shrink-0 text-[10px] text-slate-500">{ev.ts.slice(11, 19)}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={() => setShowFeed(true)}
+              className="hud-pill ml-auto flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[11px] text-cyan-200 hover:border-cyan-400/40"
+            >
+              <Zap className="h-3 w-3 text-cyan-400" />
+              实时动态 ({live.events.length})
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Right Slide-Over Glass Telemetry Inspector Drawer */}
-      {selected && (
-        <aside className="hud-glass absolute bottom-4 right-4 top-20 z-30 flex w-80 max-w-[calc(100%-2rem)] flex-col overflow-hidden rounded-2xl">
+      {liveSelected && (
+        <aside className="hud-glass absolute bottom-4 right-4 top-24 z-30 flex w-80 max-w-[calc(100%-2rem)] flex-col overflow-hidden rounded-2xl">
           <div className="flex items-center justify-between border-b border-slate-700/60 px-4 py-3.5">
             <div className="flex items-center gap-2">
-              {selected.kind === "server" && <Server className="h-4 w-4 text-violet-300" />}
-              {selected.kind === "member" && <MapPin className="h-4 w-4 text-cyan-300" />}
-              {selected.kind === "link" && <Layers className="h-4 w-4 text-emerald-300" />}
+              {liveSelected.kind === "server" && <Server className="h-4 w-4 text-violet-300" />}
+              {liveSelected.kind === "member" && <MapPin className="h-4 w-4 text-cyan-300" />}
+              {liveSelected.kind === "link" && <Layers className="h-4 w-4 text-emerald-300" />}
               <h2 className="text-sm font-semibold text-white">
-                {selected.kind === "server"
+                {liveSelected.kind === "server"
                   ? "服务器主节点"
-                  : selected.kind === "link"
+                  : liveSelected.kind === "link"
                     ? "3D 通信链路详情"
-                    : selected.member.room === "登录"
+                    : liveSelected.member.room === "登录"
                       ? "登录溯源详情"
                       : "房间节点遥测"}
               </h2>
@@ -853,20 +1011,20 @@ function MapPage({ user, onError }: { user: User; onError: (msg: string) => void
           </div>
 
           <div className="flex-1 space-y-4 overflow-y-auto p-4 text-xs">
-            {selected.kind === "server" && (
+            {liveSelected.kind === "server" && (
               <>
                 <div className="rounded-xl border border-violet-500/30 bg-violet-500/10 p-3">
-                  <div className="text-sm font-semibold text-violet-100">{selected.server.name}</div>
-                  <div className="mono-num mt-1 text-violet-300">{selected.server.ip}</div>
+                  <div className="text-sm font-semibold text-violet-100">{liveSelected.server.name}</div>
+                  <div className="mono-num mt-1 text-violet-300">{liveSelected.server.ip}</div>
                 </div>
                 <dl className="grid gap-2.5">
-                  <InfoRow label="地理位置" value={`${selected.server.city || "未知城市"} ${selected.server.country || ""}`} />
+                  <InfoRow label="地理位置" value={`${liveSelected.server.city || "未知城市"} ${liveSelected.server.country || ""}`} />
                   <InfoRow
                     label="经纬度"
                     mono
                     value={
-                      selected.server.lat != null && selected.server.lon != null
-                        ? `${selected.server.lat.toFixed(4)}, ${selected.server.lon.toFixed(4)}`
+                      liveSelected.server.lat != null && liveSelected.server.lon != null
+                        ? `${liveSelected.server.lat.toFixed(4)}, ${liveSelected.server.lon.toFixed(4)}`
                         : "未配置"
                     }
                   />
@@ -877,85 +1035,85 @@ function MapPage({ user, onError }: { user: User; onError: (msg: string) => void
               </>
             )}
 
-            {selected.kind === "member" && (
+            {liveSelected.kind === "member" && (
               <>
                 <div className="flex items-center justify-between rounded-xl border border-slate-700/60 bg-slate-900/60 p-3">
                   <div>
                     <div className="text-sm font-semibold text-white">
-                      {selected.member.room === "登录" ? selected.member.owner : selected.member.room}
+                      {liveSelected.member.room === "登录" ? liveSelected.member.owner : liveSelected.member.room}
                     </div>
                     <div className="mono-num mt-0.5 text-cyan-300">
-                      {selected.member.room === "登录" ? selected.member.source : selected.member.virtualIp}
+                      {liveSelected.member.room === "登录" ? liveSelected.member.source : liveSelected.member.virtualIp}
                     </div>
                   </div>
-                  {selected.member.room !== "登录" ? (
-                    modeBadge(selected.member.mode)
+                  {liveSelected.member.room !== "登录" ? (
+                    modeBadge(liveSelected.member.mode)
                   ) : (
-                    <Badge variant={selected.member.mac === "ok" ? "secondary" : "destructive"}>
-                      {selected.member.mac === "ok" ? "成功" : selected.member.mac === "logout" ? "退出" : "失败"}
+                    <Badge variant={liveSelected.member.mac === "ok" ? "secondary" : "destructive"}>
+                      {liveSelected.member.mac === "ok" ? "成功" : liveSelected.member.mac === "logout" ? "退出" : "失败"}
                     </Badge>
                   )}
                 </div>
 
                 <dl className="grid gap-2.5">
-                  {selected.member.room === "登录" ? (
+                  {liveSelected.member.room === "登录" ? (
                     <>
-                      <InfoRow label="登录账号" value={selected.member.owner} />
-                      <InfoRow label="来源地址" mono value={selected.member.source} />
-                      <InfoRow label="记录时间" mono value={when(selected.member.virtualIp)} />
+                      <InfoRow label="登录账号" value={liveSelected.member.owner} />
+                      <InfoRow label="来源地址" mono value={liveSelected.member.source} />
+                      <InfoRow label="记录时间" mono value={when(liveSelected.member.virtualIp)} />
                     </>
                   ) : (
                     <>
-                      <InfoRow label="房间拥有者" value={selected.member.owner} />
-                      <InfoRow label="虚拟地址" mono value={selected.member.virtualIp || "—"} />
-                      <InfoRow label="设备 MAC" mono value={selected.member.mac} />
-                      <InfoRow label="公网出口" mono value={selected.member.source} />
+                      <InfoRow label="房间拥有者" value={liveSelected.member.owner} />
+                      <InfoRow label="虚拟地址" mono value={liveSelected.member.virtualIp || "—"} />
+                      <InfoRow label="设备 MAC" mono value={liveSelected.member.mac} />
+                      <InfoRow label="公网出口" mono value={liveSelected.member.source} />
                       <InfoRow
                         label="隧道模式"
                         value={
-                          selected.member.tcpRelay
+                          liveSelected.member.tcpRelay
                             ? "强制 TCP 中转"
-                            : selected.member.direct
+                            : liveSelected.member.direct
                               ? "UDP 打洞直连"
                               : "自动中转 / 等待打洞"
                         }
                       />
-                      <InfoRow label="累计中转帧" mono value={String(selected.member.relayCount ?? 0)} />
+                      <InfoRow label="累计中转帧" mono value={String(liveSelected.member.relayCount ?? 0)} />
                     </>
                   )}
                   <InfoRow
                     label="GeoIP 归属"
-                    value={`${selected.member.city || "未定位"} ${selected.member.country || ""}`.trim()}
+                    value={`${liveSelected.member.city || "未定位"} ${liveSelected.member.country || ""}`.trim()}
                   />
                   <InfoRow
                     label="坐标"
                     mono
                     value={
-                      selected.member.lat != null && selected.member.lon != null
-                        ? `${selected.member.lat.toFixed(4)}, ${selected.member.lon.toFixed(4)}`
+                      liveSelected.member.lat != null && liveSelected.member.lon != null
+                        ? `${liveSelected.member.lat.toFixed(4)}, ${liveSelected.member.lon.toFixed(4)}`
                         : "—"
                     }
                   />
                 </dl>
 
                 <div className="flex flex-col gap-2 pt-2">
-                  {selected.member.lat != null && selected.member.lon != null && viewMode === "3d" && (
+                  {liveSelected.member.lat != null && liveSelected.member.lon != null && viewMode === "3d" && (
                     <Button
                       size="sm"
                       variant="outline"
-                      onClick={() => globeRef.current?.focusLatLon(selected.member.lat!, selected.member.lon!, 2.1)}
+                      onClick={() => globeRef.current?.focusLatLon(liveSelected.member.lat!, liveSelected.member.lon!, 2.1)}
                       className="w-full border-slate-700 bg-slate-900/70 text-slate-200 hover:bg-slate-800"
                     >
                       <Crosshair className="mr-1.5 h-3.5 w-3.5 text-cyan-400" />
                       飞镜聚焦该节点
                     </Button>
                   )}
-                  {selected.member.room !== "登录" && can(user, "member:kick") && (
+                  {liveSelected.member.room !== "登录" && can(user, "member:kick") && (
                     <Button
                       size="sm"
                       variant="destructive"
                       disabled={kickBusy}
-                      onClick={() => void kickSelectedMember(selected.member)}
+                      onClick={() => void kickSelectedMember(liveSelected.member)}
                       className="w-full"
                     >
                       {kickBusy ? "正在移出..." : "移出该在线成员"}
@@ -965,34 +1123,34 @@ function MapPage({ user, onError }: { user: User; onError: (msg: string) => void
               </>
             )}
 
-            {selected.kind === "link" && (
+            {liveSelected.kind === "link" && (
               <>
                 <div className="rounded-xl border border-slate-700/60 bg-slate-900/60 p-3">
                   <div className="mb-2">
-                    {modeBadge(selected.link.kind === "direct" ? "direct" : "relay")}
+                    {modeBadge(liveSelected.link.kind === "direct" ? "direct" : "relay")}
                   </div>
                   <div className="mono-num text-sm font-semibold text-white">
-                    {selected.link.from.label} ↔ {selected.link.to.label}
+                    {liveSelected.link.from.label} ↔ {liveSelected.link.to.label}
                   </div>
                 </div>
                 <dl className="grid gap-2.5">
-                  <InfoRow label="所属房间" value={selected.link.room} />
+                  <InfoRow label="所属房间" value={liveSelected.link.room} />
                   <InfoRow
                     label="通信路径"
-                    value={selected.link.kind === "direct" ? "Node ↔ Node（UDP 穿透直连）" : "Node ↔ Server（TCP 中继转发）"}
+                    value={liveSelected.link.kind === "direct" ? "Node ↔ Node（UDP 穿透直连）" : "Node ↔ Server（TCP 中继转发）"}
                   />
                   <InfoRow
                     label="起点坐标"
                     mono
-                    value={`${selected.link.from.lat.toFixed(3)}, ${selected.link.from.lon.toFixed(3)}`}
+                    value={`${liveSelected.link.from.lat.toFixed(3)}, ${liveSelected.link.from.lon.toFixed(3)}`}
                   />
                   <InfoRow
                     label="终点坐标"
                     mono
-                    value={`${selected.link.to.lat.toFixed(3)}, ${selected.link.to.lon.toFixed(3)}`}
+                    value={`${liveSelected.link.to.lat.toFixed(3)}, ${liveSelected.link.to.lon.toFixed(3)}`}
                   />
-                  {selected.link.kind === "relay" && (
-                    <InfoRow label="房间累计中转" mono value={`${selected.link.relayCount ?? 0} 帧`} />
+                  {liveSelected.link.kind === "relay" && (
+                    <InfoRow label="房间累计中转" mono value={`${liveSelected.link.relayCount ?? 0} 帧`} />
                   )}
                 </dl>
                 {viewMode === "3d" && (
@@ -1000,7 +1158,7 @@ function MapPage({ user, onError }: { user: User; onError: (msg: string) => void
                     <Button
                       size="sm"
                       variant="outline"
-                      onClick={() => globeRef.current?.focusLatLon(selected.link.from.lat, selected.link.from.lon, 2.2)}
+                      onClick={() => globeRef.current?.focusLatLon(liveSelected.link.from.lat, liveSelected.link.from.lon, 2.2)}
                       className="border-slate-700 bg-slate-900/70 text-xs"
                     >
                       聚焦起点
@@ -1008,7 +1166,7 @@ function MapPage({ user, onError }: { user: User; onError: (msg: string) => void
                     <Button
                       size="sm"
                       variant="outline"
-                      onClick={() => globeRef.current?.focusLatLon(selected.link.to.lat, selected.link.to.lon, 2.2)}
+                      onClick={() => globeRef.current?.focusLatLon(liveSelected.link.to.lat, liveSelected.link.to.lon, 2.2)}
                       className="border-slate-700 bg-slate-900/70 text-xs"
                     >
                       聚焦终点
@@ -1033,54 +1191,71 @@ function InfoRow({ label, value, mono }: { label: string; value: string; mono?: 
   );
 }
 
-function RoomsPage({ user, onError }: { user: User; onError: (value: string) => void }) {
-  const [rooms, setRooms] = useState<Room[]>([]);
+function RoomsPage({
+  user,
+  live,
+  onError,
+}: {
+  user: User;
+  live: LivePanelController;
+  onError: (value: string) => void;
+}) {
+  const rooms = live.rooms;
   const [name, setName] = useState("");
-  const [q, setQ] = useState("");
+  const [q, setQ] = useState(live.roomQuery);
   const [ticket, setTicket] = useState("");
   const [copied, setCopied] = useState(false);
   const [membersRoom, setMembersRoom] = useState<string | null>(null);
-  const [members, setMembers] = useState<
-    { room: string; mac: string; virtualIp: string; source: string; direct?: boolean; tcpRelay?: boolean; relayCount?: number }[]
-  >([]);
-
-  async function load(query = q) {
-    onError("");
-    const body = await api.rooms(query);
-    setRooms(body.items);
-  }
+  const [members, setMembers] = useState<(Member & { room: string })[]>([]);
 
   async function loadMembers(roomName: string) {
     onError("");
-    const body = await api.members(roomName);
+    const res = await live.action<{ room: string; items: Member[] }>("room:members", { name: roomName });
     setMembersRoom(roomName);
-    setMembers(body.items.map((item) => ({ room: roomName, ...item })));
+    setMembers((res.items ?? []).map((item) => ({ room: roomName, ...item })));
   }
 
+  // Keep open member dialog synchronized with live WS snapshots
   useEffect(() => {
-    void load().catch((err) => onError(err instanceof Error ? err.message : String(err)));
-  }, []);
+    if (!membersRoom || !live.mapData?.members) return;
+    const filtered = live.mapData.members
+      .filter((m) => m.room === membersRoom)
+      .map((m) => ({
+        room: m.room,
+        mac: m.mac,
+        virtualIp: m.virtualIp,
+        source: m.source,
+        ip: m.ip,
+        direct: m.direct,
+        tcpRelay: m.tcpRelay,
+        relayCount: m.relayCount,
+      }));
+    setMembers(filtered);
+  }, [membersRoom, live.mapData?.members]);
 
   const totalOnline = rooms.reduce((acc, r) => acc + (r.onlineCount ?? 0), 0);
   const activeCount = rooms.filter((r) => (r.onlineCount ?? 0) > 0).length;
 
   return (
     <>
-      <PageHead title="房间管理" subtitle="管理虚拟局域网房间、实时成员状态与 12 小时加入票据">
+      <PageHead title="房间管理" subtitle="WebSocket 实时同步虚拟局域网房间、在线成员与 12 小时加入票据">
+        <WsStatusPill status={live.status} rttMs={live.rttMs} />
         <div className="relative">
           <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-slate-500" />
           <Input
             className="w-48 border-slate-700/70 bg-[#0b1324] pl-9 text-sm"
             placeholder="搜索房间名"
             value={q}
-            onChange={(event) => setQ(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") void load().catch((err) => onError(String(err)));
+            onChange={(event) => {
+              const val = event.target.value;
+              setQ(val);
+              live.setRoomQuery(val);
             }}
           />
         </div>
-        <Button variant="outline" className="border-slate-700/70 bg-[#0b1324]" onClick={() => void load().catch((err) => onError(String(err)))}>
-          查询
+        <Button variant="outline" className="border-slate-700/70 bg-[#0b1324]" onClick={() => live.refresh()}>
+          <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
+          同步
         </Button>
       </PageHead>
 
@@ -1096,11 +1271,15 @@ function RoomsPage({ user, onError }: { user: User; onError: (value: string) => 
           onSubmit={(event) => {
             event.preventDefault();
             if (!name.trim()) return;
-            void api
-              .createRoom(name)
+            void live
+              .action("room:create", { name })
               .then(() => {
+                onError("");
                 setName("");
-                return load("");
+                if (q) {
+                  setQ("");
+                  live.setRoomQuery("");
+                }
               })
               .catch((err) => onError(err instanceof Error ? err.message : "创建失败"));
           }}
@@ -1161,8 +1340,8 @@ function RoomsPage({ user, onError }: { user: User; onError: (value: string) => 
                         size="sm"
                         className="border-cyan-500/35 bg-cyan-500/10 text-cyan-200 hover:bg-cyan-500/20"
                         onClick={() =>
-                          void api
-                            .ticket(room.name)
+                          void live
+                            .action<{ token: string; expiresAt?: string }>("room:ticket", { name: room.name })
                             .then((body) => {
                               onError("");
                               setCopied(false);
@@ -1179,7 +1358,11 @@ function RoomsPage({ user, onError }: { user: User; onError: (value: string) => 
                       <Button
                         variant="destructive"
                         size="sm"
-                        onClick={() => void api.closeRoom(room.name).then(() => load()).catch((err) => onError(err instanceof Error ? err.message : String(err)))}
+                        onClick={() =>
+                          void live
+                            .action("room:close", { name: room.name })
+                            .catch((err) => onError(err instanceof Error ? err.message : String(err)))
+                        }
                       >
                         关闭
                       </Button>
@@ -1232,7 +1415,7 @@ function RoomsPage({ user, onError }: { user: User; onError: (value: string) => 
         <DialogContent className="border-slate-700/70 bg-[#0b1324] text-slate-100 sm:max-w-lg">
           <DialogHeader>
             <DialogTitle>在线成员 · {membersRoom}</DialogTitle>
-            <DialogDescription className="text-slate-400">当前活跃心跳成员及其隧道转发模式</DialogDescription>
+            <DialogDescription className="text-slate-400">WebSocket 实时推送活跃心跳成员及其隧道转发模式</DialogDescription>
           </DialogHeader>
           <div className="grid gap-2.5 text-xs">
             {members.length === 0 && <p className="py-6 text-center text-slate-500">该房间暂无在线成员</p>}
@@ -1255,8 +1438,8 @@ function RoomsPage({ user, onError }: { user: User; onError: (value: string) => 
                     variant="destructive"
                     size="sm"
                     onClick={() =>
-                      void api
-                        .kick(member.room, member.mac)
+                      void live
+                        .action("kick", { room: member.room, mac: member.mac })
                         .then(() => loadMembers(member.room))
                         .catch((err) => onError(err instanceof Error ? err.message : String(err)))
                     }

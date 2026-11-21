@@ -164,6 +164,7 @@ func (s *Server) Handler() http.Handler {
 	engine.GET("/api/rooms/:name/members", s.members)
 	engine.POST("/api/rooms/:name/kick", s.kick)
 	engine.GET("/api/map", s.worldMap)
+	engine.GET("/api/ws", s.panelWS)
 	engine.GET("/api/login-logs", s.loginLogs)
 	engine.NoRoute(s.panelFile)
 	return engine
